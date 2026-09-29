@@ -59,7 +59,7 @@ jobs:
           Write-Host "Source commit:"
           git rev-parse HEAD
 
-      - name: Build Release Win32
+      - name: Build Release Win32 project directly
         shell: powershell
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -78,14 +78,18 @@ jobs:
           Write-Host "Using MSBuild:"
           Write-Host $msbuild
 
+          $project = "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+
+          Write-Host "Building:"
+          Write-Host $project
+
           & $msbuild `
-            "src\bzh_dell_smm_io.sln" `
+            $project `
             /m `
             /t:Rebuild `
             /p:Configuration=Release `
             /p:Platform=Win32 `
             /p:WindowsTargetPlatformVersion=10.0.22621.0 `
-            /p:TargetVersion=Windows10 `
             /v:minimal
 
           if ($LASTEXITCODE -ne 0) {
@@ -97,12 +101,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path artifact -Force | Out-Null
 
-          Write-Host "=== BUILD OUTPUT FILES ==="
-
           $files = Get-ChildItem src -Recurse -File |
             Where-Object {
               $_.Extension -in ".sys", ".inf", ".cat", ".pdb"
             }
+
+          Write-Host "=== BUILD OUTPUT FILES ==="
 
           $files |
             Select-Object FullName, Length |
@@ -129,6 +133,8 @@ jobs:
           Write-Host ""
           Write-Host "=== PE ARCHITECTURE ==="
 
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
           $dumpbin = & $vswhere `
             -latest `
             -products * `
@@ -141,6 +147,9 @@ jobs:
               & $dumpbin /headers $sys.FullName |
                 Select-String "machine"
             }
+          }
+          else {
+            Write-Host "dumpbin not found - skipping PE header check"
           }
 
       - name: Upload x86 driver artifact
