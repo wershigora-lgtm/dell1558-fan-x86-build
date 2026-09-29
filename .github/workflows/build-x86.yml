@@ -1,4 +1,4 @@
-name: Build Dell SMM x86 with VS2019
+name: Build Dell SMM x86 with EWDK 20348
 
 on:
   workflow_dispatch:
@@ -8,132 +8,78 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Download Visual Studio 2019 Build Tools
+      - name: Download official Microsoft EWDK 20348
         shell: powershell
         run: |
+          $iso = "$env:RUNNER_TEMP\EWDK20348.iso"
+
+          Write-Host "Downloading official Microsoft EWDK..."
           Invoke-WebRequest `
-            -Uri "https://aka.ms/vs/16/release/vs_buildtools.exe" `
-            -OutFile "$env:TEMP\vs_buildtools_2019.exe"
+            -Uri "https://go.microsoft.com/fwlink/?linkid=2163981" `
+            -OutFile $iso
 
-      - name: Install Visual Studio 2019 C++ Build Tools
+          if (-not (Test-Path $iso)) {
+            throw "EWDK ISO download failed"
+          }
+
+          $f = Get-Item $iso
+
+          Write-Host "Downloaded:"
+          Write-Host $f.FullName
+          Write-Host "Size bytes: $($f.Length)"
+
+      - name: Mount EWDK ISO
         shell: powershell
         run: |
-          $args = @(
-            "--quiet",
-            "--wait",
-            "--norestart",
-            "--nocache",
-            "--installPath", "C:\VS2019BT",
-            "--add", "Microsoft.VisualStudio.Workload.VCTools",
-            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "--includeRecommended"
-          )
+          $iso = "$env:RUNNER_TEMP\EWDK20348.iso"
 
-          $p = Start-Process `
-            "$env:TEMP\vs_buildtools_2019.exe" `
-            -ArgumentList $args `
-            -Wait `
+          $image = Mount-DiskImage `
+            -ImagePath $iso `
             -PassThru
 
-          Write-Host "VS2019 installer exit code: $($p.ExitCode)"
+          Start-Sleep -Seconds 3
 
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "Visual Studio 2019 Build Tools installation failed"
+          $volume = $image |
+            Get-Volume |
+            Where-Object { $_.DriveLetter } |
+            Select-Object -First 1
+
+          if (-not $volume) {
+            throw "Could not determine EWDK drive letter"
           }
 
-      - name: Download Windows 10 SDK 19041 and WDK 19041
+          $drive = "$($volume.DriveLetter):"
+
+          Write-Host "EWDK mounted as:"
+          Write-Host $drive
+
+          if (-not (Test-Path "$drive\LaunchBuildEnv.cmd")) {
+            throw "LaunchBuildEnv.cmd not found on EWDK ISO"
+          }
+
+          "EWDK_DRIVE=$drive" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+      - name: Inspect EWDK
         shell: powershell
         run: |
-          Invoke-WebRequest `
-            -Uri "https://download.microsoft.com/download/e119c04b-71aa-4067-ac3c-360c2e13d209/windowssdk/winsdksetup.exe" `
-            -OutFile "$env:TEMP\winsdksetup.exe"
-
-          Invoke-WebRequest `
-            -Uri "https://download.microsoft.com/download/1b122713-4a55-4a95-8848-279de832a4c9/wdk/wdksetup.exe" `
-            -OutFile "$env:TEMP\wdksetup.exe"
-
-      - name: Install Windows 10 SDK 19041
-        shell: powershell
-        run: |
-          $p = Start-Process `
-            "$env:TEMP\winsdksetup.exe" `
-            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
-            -Wait `
-            -PassThru
-
-          Write-Host "SDK installer exit code: $($p.ExitCode)"
-
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "Windows SDK 19041 installation failed"
-          }
-
-      - name: Install Windows 10 WDK 19041
-        shell: powershell
-        run: |
-          $p = Start-Process `
-            "$env:TEMP\wdksetup.exe" `
-            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
-            -Wait `
-            -PassThru
-
-          Write-Host "WDK installer exit code: $($p.ExitCode)"
-
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "Windows WDK 19041 installation failed"
-          }
-
-      - name: Verify VS2019 and WDK 19041
-        shell: powershell
-        run: |
-          $msbuild = "C:\VS2019BT\MSBuild\Current\Bin\MSBuild.exe"
-          $ntddk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0\km\ntddk.h"
-          $targets = "${env:ProgramFiles(x86)}\Windows Kits\10\build\10.0.19041.0\WindowsDriver.Common.targets"
-
-          Write-Host "=== MSBUILD ==="
-          Write-Host $msbuild
-          Test-Path $msbuild
+          Write-Host "EWDK drive:"
+          Write-Host $env:EWDK_DRIVE
 
           Write-Host ""
-          Write-Host "=== NTDDK.H ==="
-          Write-Host $ntddk
-          Test-Path $ntddk
+          Write-Host "=== ROOT ==="
+
+          Get-ChildItem "$env:EWDK_DRIVE\" |
+            Select-Object Name,Length
 
           Write-Host ""
-          Write-Host "=== WDK TARGETS ==="
-          Write-Host $targets
-          Test-Path $targets
+          Write-Host "=== LaunchBuildEnv ==="
 
-          if (-not (Test-Path $msbuild)) {
-            throw "VS2019 MSBuild not found"
-          }
-
-          if (-not (Test-Path $ntddk)) {
-            throw "WDK 19041 ntddk.h not found"
-          }
-
-          if (-not (Test-Path $targets)) {
-            throw "WDK 19041 build targets not found"
-          }
-
-          Write-Host ""
-          Write-Host "=== VS2019 VERSION ==="
-
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-
-          & $vswhere `
-            -products * `
-            -version "[16.0,17.0)" `
-            -format json
-
-          Write-Host ""
-          Write-Host "=== WINDOWS KERNEL TOOLSET SEARCH ==="
-
-          Get-ChildItem "C:\VS2019BT\MSBuild" `
-            -Recurse `
-            -Directory `
-            -Filter "WindowsKernelModeDriver10.0" `
-            -ErrorAction SilentlyContinue |
-            Select-Object FullName
+          Get-Item "$env:EWDK_DRIVE\LaunchBuildEnv.cmd" |
+            Select-Object FullName,Length
 
       - name: Download original Dell SMM driver source
         shell: powershell
@@ -146,42 +92,61 @@ jobs:
           Write-Host "Source commit:"
           git rev-parse HEAD
 
-      - name: Build Release Win32 using VS2019 and WDK19041
+      - name: Build Release Win32 inside EWDK
         shell: powershell
         run: |
-          $msbuild = "C:\VS2019BT\MSBuild\Current\Bin\MSBuild.exe"
-          $project = "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+          $project = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
 
-          Write-Host "MSBuild:"
-          Write-Host $msbuild
+          $batch = Join-Path `
+            $env:RUNNER_TEMP `
+            "build-ewdk.cmd"
 
-          Write-Host "Project:"
-          Write-Host $project
+          @"
+          @echo off
+          call $env:EWDK_DRIVE\LaunchBuildEnv.cmd
+          if errorlevel 1 exit /b %errorlevel%
 
-          & $msbuild `
-            $project `
-            /m `
-            /t:Rebuild `
-            /p:Configuration=Release `
-            /p:Platform=Win32 `
-            /p:TargetVersion=Windows10 `
-            /p:WindowsTargetPlatformVersion=10.0.19041.0 `
-            /p:SignMode=Off `
-            /v:minimal
+          echo.
+          echo ===== MSBUILD LOCATION =====
+          where msbuild
+          echo.
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Driver build failed"
+          echo ===== BUILDING WIN32 DRIVER =====
+
+          msbuild "$project" /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:TargetVersion=Windows10 /p:SignMode=Off /v:minimal
+
+          exit /b %errorlevel%
+          "@ | Set-Content `
+            -Path $batch `
+            -Encoding ASCII
+
+          Write-Host "Running:"
+          Get-Content $batch
+
+          & cmd.exe /d /c $batch
+
+          $code = $LASTEXITCODE
+
+          Write-Host ""
+          Write-Host "MSBuild exit code: $code"
+
+          if ($code -ne 0) {
+            throw "EWDK Win32 driver build failed"
           }
 
-      - name: Collect and verify x86 driver
+      - name: Find built driver
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Path artifact -Force | Out-Null
-
-          $sysfiles = Get-ChildItem src -Recurse -File -Filter "*.sys"
+          $sysfiles = Get-ChildItem `
+            "$env:GITHUB_WORKSPACE\src" `
+            -Recurse `
+            -File `
+            -Filter "*.sys"
 
           if (-not $sysfiles) {
-            throw "No SYS driver was produced"
+            throw "No SYS file was produced"
           }
 
           Write-Host "=== SYS FILES ==="
@@ -190,45 +155,66 @@ jobs:
             Select-Object FullName,Length |
             Format-Table -AutoSize
 
-          foreach ($file in $sysfiles) {
-            Copy-Item $file.FullName artifact -Force
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:GITHUB_WORKSPACE\artifact" `
+            -Force |
+            Out-Null
+
+          foreach ($sys in $sysfiles) {
+            Copy-Item `
+              $sys.FullName `
+              "$env:GITHUB_WORKSPACE\artifact" `
+              -Force
           }
 
-          Write-Host ""
-          Write-Host "=== SHA256 ==="
+      - name: Verify x86 PE architecture and SHA256
+        shell: powershell
+        run: |
+          $sysfiles = Get-ChildItem `
+            "$env:GITHUB_WORKSPACE\artifact" `
+            -Filter "*.sys"
 
-          Get-ChildItem artifact -Filter "*.sys" |
-            Get-FileHash -Algorithm SHA256 |
-            Format-Table Path,Hash -AutoSize
+          foreach ($sys in $sysfiles) {
 
-          Write-Host ""
-          Write-Host "=== PE MACHINE TYPE ==="
-
-          $dumpbin = Get-ChildItem `
-            "C:\VS2019BT\VC\Tools\MSVC" `
-            -Recurse `
-            -Filter "dumpbin.exe" `
-            -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.FullName -match "Hostx64\\x86\\dumpbin.exe$"
-            } |
-            Select-Object -First 1
-
-          if (-not $dumpbin) {
-            throw "x86 dumpbin.exe not found"
-          }
-
-          foreach ($sys in (Get-ChildItem artifact -Filter "*.sys")) {
             Write-Host ""
+            Write-Host "======================================"
             Write-Host "FILE: $($sys.Name)"
+            Write-Host "======================================"
 
-            & $dumpbin.FullName /headers $sys.FullName |
-              Select-String "machine"
+            $bytes = [System.IO.File]::ReadAllBytes($sys.FullName)
+
+            if ($bytes.Length -lt 256) {
+              throw "SYS file is unexpectedly small"
+            }
+
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine  = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+
+            Write-Host ("PE Machine: 0x{0:X4}" -f $machine)
+
+            if ($machine -eq 0x014C) {
+              Write-Host "Architecture: x86 / i386 - CORRECT"
+            }
+            elseif ($machine -eq 0x8664) {
+              throw "Driver is x64, not x86"
+            }
+            else {
+              throw ("Unexpected PE machine type: 0x{0:X4}" -f $machine)
+            }
+
+            $hash = Get-FileHash `
+              $sys.FullName `
+              -Algorithm SHA256
+
+            Write-Host ""
+            Write-Host "SHA256:"
+            Write-Host $hash.Hash
           }
 
       - name: Upload x86 driver artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dell-smm-x86-vs2019
+          name: dell-smm-x86-ewdk20348
           path: artifact
           if-no-files-found: error
