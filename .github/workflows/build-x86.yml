@@ -8,14 +8,35 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Download official Microsoft WDK
+      - name: Download Microsoft Windows 10 19041 SDK and WDK
         shell: powershell
         run: |
+          Write-Host "Downloading Windows 10 SDK 19041..."
           Invoke-WebRequest `
-            -Uri "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
+            -Uri "https://go.microsoft.com/fwlink/?linkid=2311805" `
+            -OutFile "$env:TEMP\winsdksetup.exe"
+
+          Write-Host "Downloading Windows 10 WDK 19041..."
+          Invoke-WebRequest `
+            -Uri "https://go.microsoft.com/fwlink/?linkid=2342425" `
             -OutFile "$env:TEMP\wdksetup.exe"
 
-      - name: Install Windows Driver Kit
+      - name: Install Windows 10 SDK 19041
+        shell: powershell
+        run: |
+          $p = Start-Process `
+            "$env:TEMP\winsdksetup.exe" `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
+            -Wait `
+            -PassThru
+
+          Write-Host "SDK exit code: $($p.ExitCode)"
+
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "Windows SDK installation failed"
+          }
+
+      - name: Install Windows 10 WDK 19041
         shell: powershell
         run: |
           $p = Start-Process `
@@ -30,19 +51,27 @@ jobs:
             throw "Windows WDK installation failed"
           }
 
-      - name: Verify Windows 10 SDK 19041 exists
+      - name: Verify kernel headers
         shell: powershell
         run: |
-          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
+          $ntddk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0\km\ntddk.h"
 
-          Write-Host "Checking:"
-          Write-Host $sdk
+          Write-Host "Looking for:"
+          Write-Host $ntddk
 
-          if (-not (Test-Path $sdk)) {
-            throw "Windows 10 SDK 19041 is not installed on runner"
+          if (-not (Test-Path $ntddk)) {
+            Write-Host "Contents of Windows Kits Include:"
+            Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" `
+              -Recurse `
+              -Filter "ntddk.h" `
+              -ErrorAction SilentlyContinue |
+              Select-Object FullName
+
+            throw "ntddk.h for WDK 19041 not found"
           }
 
-          Write-Host "Windows 10 SDK 19041 found."
+          Write-Host "SUCCESS: ntddk.h found."
+          Get-Item $ntddk | Select-Object FullName,Length
 
       - name: Download original Dell SMM driver source
         shell: powershell
@@ -76,9 +105,6 @@ jobs:
 
           $project = "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
 
-          Write-Host "Building:"
-          Write-Host $project
-
           & $msbuild `
             $project `
             /m `
@@ -87,7 +113,7 @@ jobs:
             /p:Platform=Win32 `
             /p:TargetVersion=Windows10 `
             /p:WindowsTargetPlatformVersion=10.0.19041.0 `
-            /p:_NT_TARGET_VERSION=0x0A000000 `
+            /p:_NT_TARGET_VERSION=0x0A000008 `
             /v:minimal
 
           if ($LASTEXITCODE -ne 0) {
@@ -126,7 +152,7 @@ jobs:
 
           Get-ChildItem artifact -Filter *.sys |
             Get-FileHash -Algorithm SHA256 |
-            Format-Table Path, Hash -AutoSize
+            Format-Table Path,Hash -AutoSize
 
           Write-Host ""
           Write-Host "=== PE ARCHITECTURE ==="
@@ -145,9 +171,6 @@ jobs:
               & $dumpbin /headers $sys.FullName |
                 Select-String "machine"
             }
-          }
-          else {
-            Write-Host "dumpbin not found - skipping PE header check"
           }
 
       - name: Upload x86 driver artifact
