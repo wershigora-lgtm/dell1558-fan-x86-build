@@ -1,22 +1,20 @@
-name: Install and inspect x86 WDK
+name: Build Dell SMM x86 driver
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspect-wdk:
+  build-x86:
     runs-on: windows-2022
 
     steps:
       - name: Download official Microsoft SDK and WDK
         shell: powershell
         run: |
-          Write-Host "Downloading Windows SDK 22621..."
           Invoke-WebRequest `
             -Uri "https://download.microsoft.com/download/cb9de490-6e67-4ac6-8c2c-6dfabb824e8a/windowssdk/winsdksetup.exe" `
             -OutFile "$env:TEMP\winsdksetup.exe"
 
-          Write-Host "Downloading Windows WDK 22621..."
           Invoke-WebRequest `
             -Uri "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
             -OutFile "$env:TEMP\wdksetup.exe"
@@ -24,20 +22,13 @@ jobs:
       - name: Install Windows SDK
         shell: powershell
         run: |
-          $log = "$env:TEMP\winsdk-install.log"
-
           $p = Start-Process `
             "$env:TEMP\winsdksetup.exe" `
-            -ArgumentList "/Features","+","/Quiet","/NoRestart","/Log",$log `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
             -Wait `
             -PassThru
 
-          Write-Host "SDK installer exit code: $($p.ExitCode)"
-
-          if (Test-Path $log) {
-            Write-Host "=== SDK LOG TAIL ==="
-            Get-Content $log -Tail 80
-          }
+          Write-Host "SDK exit code: $($p.ExitCode)"
 
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "Windows SDK installation failed"
@@ -46,52 +37,115 @@ jobs:
       - name: Install Windows Driver Kit
         shell: powershell
         run: |
-          $log = "$env:TEMP\wdk-install.log"
-
           $p = Start-Process `
             "$env:TEMP\wdksetup.exe" `
-            -ArgumentList "/Features","+","/Quiet","/NoRestart","/Log",$log `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
             -Wait `
             -PassThru
 
-          Write-Host "WDK installer exit code: $($p.ExitCode)"
-
-          if (Test-Path $log) {
-            Write-Host "=== WDK LOG TAIL ==="
-            Get-Content $log -Tail 80
-          }
+          Write-Host "WDK exit code: $($p.ExitCode)"
 
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "Windows WDK installation failed"
           }
 
-      - name: Inspect installed SDK and WDK
+      - name: Download original Dell SMM driver source
         shell: powershell
         run: |
-          Write-Host "=== INCLUDE VERSIONS ==="
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" `
-            -Directory -ErrorAction SilentlyContinue |
-            Select-Object Name
+          git clone --depth 1 `
+            https://github.com/424778940z/bzh-windrv-dell-smm-io.git src
+
+          Set-Location src
+          Write-Host "Source commit:"
+          git rev-parse HEAD
+
+      - name: Build Release Win32
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $msbuild = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" |
+            Select-Object -First 1
+
+          if (-not $msbuild) {
+            throw "MSBuild not found"
+          }
+
+          Write-Host "Using MSBuild:"
+          Write-Host $msbuild
+
+          & $msbuild `
+            "src\bzh_dell_smm_io.sln" `
+            /m `
+            /t:Rebuild `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:WindowsTargetPlatformVersion=10.0.22621.0 `
+            /p:TargetVersion=Windows10 `
+            /v:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Driver build failed"
+          }
+
+      - name: Collect and verify x86 driver
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path artifact -Force | Out-Null
+
+          Write-Host "=== BUILD OUTPUT FILES ==="
+
+          $files = Get-ChildItem src -Recurse -File |
+            Where-Object {
+              $_.Extension -in ".sys", ".inf", ".cat", ".pdb"
+            }
+
+          $files |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+          $sysfiles = $files |
+            Where-Object { $_.Extension -eq ".sys" }
+
+          if (-not $sysfiles) {
+            throw "No .sys driver produced"
+          }
+
+          foreach ($file in $files) {
+            Copy-Item $file.FullName artifact -Force
+          }
 
           Write-Host ""
-          Write-Host "=== LIB VERSIONS ==="
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib" `
-            -Directory -ErrorAction SilentlyContinue |
-            Select-Object Name
+          Write-Host "=== SHA256 ==="
+
+          Get-ChildItem artifact -Filter *.sys |
+            Get-FileHash -Algorithm SHA256 |
+            Format-Table Path, Hash -AutoSize
 
           Write-Host ""
-          Write-Host "=== WDK BUILD FILES ==="
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\build" `
-            -Recurse `
-            -Filter "WindowsDriver*.props" `
-            -ErrorAction SilentlyContinue |
-            Select-Object FullName
+          Write-Host "=== PE ARCHITECTURE ==="
 
-          Write-Host ""
-          Write-Host "=== KMDF x86 LIBRARIES ==="
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10" `
-            -Recurse `
-            -Filter "Wdf*.lib" `
-            -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "\\x86\\" } |
-            Select-Object -First 20 FullName
+          $dumpbin = & $vswhere `
+            -latest `
+            -products * `
+            -find "VC\Tools\MSVC\**\bin\Hostx64\x86\dumpbin.exe" |
+            Select-Object -First 1
+
+          if ($dumpbin) {
+            foreach ($sys in (Get-ChildItem artifact -Filter *.sys)) {
+              Write-Host "FILE: $($sys.Name)"
+              & $dumpbin /headers $sys.FullName |
+                Select-String "machine"
+            }
+          }
+
+      - name: Upload x86 driver artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dell-smm-x86-release
+          path: artifact
+          if-no-files-found: error
