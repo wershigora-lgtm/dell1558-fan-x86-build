@@ -240,6 +240,7 @@ jobs:
             /nologo ^
             /c ^
             /TC ^
+            /Gz ^
             /kernel ^
             /GS- ^
             /Zl ^
