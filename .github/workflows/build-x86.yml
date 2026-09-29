@@ -1,4 +1,4 @@
-name: Build Dell Studio 1558 read-only x86 driver
+name: Build Dell Studio 1558 x86 RPM driver
 
 on:
   workflow_dispatch:
@@ -6,42 +6,43 @@ on:
 jobs:
   build-x86:
     runs-on: windows-2022
+    timeout-minutes: 10
 
     steps:
-      - name: Download NuGet
+      - name: Verify preinstalled NuGet
         shell: powershell
         run: |
-          Invoke-WebRequest `
-            -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" `
-            -OutFile "$env:GITHUB_WORKSPACE\nuget.exe"
+          Write-Host "=== NUGET ==="
+          where.exe nuget
+          nuget help | Select-Object -First 5
 
-          if (-not (Test-Path "$env:GITHUB_WORKSPACE\nuget.exe")) {
-            throw "nuget.exe download failed"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Preinstalled NuGet is not available"
           }
 
-      - name: Download Microsoft WDK x86 22621
+      - name: Get Windows 10 x86 WDK 19041
         shell: powershell
         run: |
-          $nuget = "$env:GITHUB_WORKSPACE\nuget.exe"
           $packages = "$env:GITHUB_WORKSPACE\packages"
 
-          & $nuget install Microsoft.Windows.WDK.x86 `
-            -Version 10.0.22621.3233 `
+          nuget install Microsoft.Windows.WDK.x86 `
+            -Version 10.0.19041.5 `
             -OutputDirectory $packages `
             -Source "https://api.nuget.org/v3/index.json" `
             -NonInteractive
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Microsoft.Windows.WDK.x86 22621 download failed"
+            throw "WDK x86 19041 download failed"
           }
 
+          Write-Host ""
           Write-Host "=== PACKAGES ==="
 
           Get-ChildItem $packages -Directory |
             Select-Object Name |
             Format-Table -AutoSize
 
-      - name: Locate kernel headers and x86 libraries
+      - name: Locate WDK headers and x86 kernel library
         shell: powershell
         run: |
           $packages = "$env:GITHUB_WORKSPACE\packages"
@@ -50,14 +51,12 @@ jobs:
             -Recurse `
             -File `
             -Filter "ntddk.h" |
-            Where-Object { $_.FullName -match "\\km\\" } |
             Select-Object -First 1
 
           $ntdef = Get-ChildItem $packages `
             -Recurse `
             -File `
             -Filter "ntdef.h" |
-            Where-Object { $_.FullName -match "\\shared\\" } |
             Select-Object -First 1
 
           $ntoskrnl = Get-ChildItem $packages `
@@ -65,8 +64,8 @@ jobs:
             -File `
             -Filter "ntoskrnl.lib" |
             Where-Object {
-              $_.FullName -match "\\km\\x86\\" -or
-              $_.FullName -match "\\km\\i386\\"
+              $_.FullName -match "\\x86\\" -or
+              $_.FullName -match "\\i386\\"
             } |
             Select-Object -First 1
 
@@ -75,7 +74,7 @@ jobs:
           }
 
           if (-not $ntdef) {
-            throw "shared header directory not found"
+            throw "ntdef.h not found"
           }
 
           if (-not $ntoskrnl) {
@@ -86,6 +85,10 @@ jobs:
           $sharedInclude = Split-Path $ntdef.FullName
           $kmLib = Split-Path $ntoskrnl.FullName
 
+          Write-Host "=== NTDDK ==="
+          Write-Host $ntddk.FullName
+
+          Write-Host ""
           Write-Host "=== KM INCLUDE ==="
           Write-Host $kmInclude
 
@@ -94,8 +97,8 @@ jobs:
           Write-Host $sharedInclude
 
           Write-Host ""
-          Write-Host "=== X86 KERNEL LIB ==="
-          Write-Host $kmLib
+          Write-Host "=== NTOSKRNL X86 ==="
+          Write-Host $ntoskrnl.FullName
 
           "KM_INCLUDE=$kmInclude" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -106,7 +109,7 @@ jobs:
           "KM_LIB=$kmLib" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Locate Visual C++ x86 compiler
+      - name: Locate x86 MSVC compiler
         shell: powershell
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -118,7 +121,7 @@ jobs:
             -property installationPath
 
           if (-not $vs) {
-            throw "Visual Studio C++ tools not found"
+            throw "Visual C++ installation not found"
           }
 
           $vcvars = Join-Path `
@@ -129,13 +132,13 @@ jobs:
             throw "vcvars32.bat not found"
           }
 
-          Write-Host "=== VC x86 ENVIRONMENT ==="
+          Write-Host "=== VCVARS32 ==="
           Write-Host $vcvars
 
           "VCVARS32=$vcvars" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Create read-only Dell SMM driver source
+      - name: Create read-only Dell SMM driver
         shell: powershell
         run: |
           $source = @'
@@ -150,7 +153,7 @@ jobs:
           typedef struct _DELL_RPM_RESULT {
               ULONG RawEax;
               ULONG RawCount;
-              ULONG RpmAssumingMultiplier30;
+              ULONG Rpm;
               ULONG CarryFlag;
           } DELL_RPM_RESULT, *PDELL_RPM_RESULT;
 
@@ -174,39 +177,34 @@ jobs:
           }
 
           /*
-           * READ-ONLY Dell SMM call.
+           * READ ONLY.
            *
-           * EAX = 0x02A3 : get fan speed
-           * EBX = 0      : fan number 0
+           * Dell legacy SMM:
+           * EAX = 0x02A3 = read fan speed
+           * EBX = 0      = fan 0
            *
-           * No fan-control or EC-control SMM functions exist
-           * anywhere in this first driver.
+           * This version contains NO command for changing
+           * fan speed and NO command for disabling BIOS
+           * automatic fan control.
            */
           static ULONG
-          DellSmmReadFan0(
+          DellReadFan0(
               PUCHAR CarryFlag
               )
           {
               ULONG resultEax = 0xFFFFFFFF;
               UCHAR carry = 0xFF;
-              KAFFINITY previousAffinity;
+              KAFFINITY oldAffinity;
 
-              /*
-               * Dell legacy SMM is defined on CPU 0.
-               */
-              previousAffinity =
+              oldAffinity =
                   KeSetSystemAffinityThreadEx((KAFFINITY)1);
 
               if (KeGetCurrentProcessorNumber() != 0) {
-                  KeRevertToUserAffinityThreadEx(previousAffinity);
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
                   *CarryFlag = 0xFE;
                   return 0xFFFFFFFF;
               }
 
-              /*
-               * x86 only.
-               * Preserve nonvolatile registers EBX, ESI, EDI.
-               */
               __asm {
                   push ebx
                   push esi
@@ -230,7 +228,7 @@ jobs:
                   pop ebx
               }
 
-              KeRevertToUserAffinityThreadEx(previousAffinity);
+              KeRevertToUserAffinityThreadEx(oldAffinity);
 
               *CarryFlag = carry;
               return resultEax;
@@ -243,7 +241,12 @@ jobs:
               )
           {
               UNREFERENCED_PARAMETER(DeviceObject);
-              return CompleteIrp(Irp, STATUS_SUCCESS, 0);
+
+              return CompleteIrp(
+                  Irp,
+                  STATUS_SUCCESS,
+                  0
+                  );
           }
 
           NTSTATUS NTAPI
@@ -253,6 +256,7 @@ jobs:
               )
           {
               UNREFERENCED_PARAMETER(DeviceObject);
+
               return CompleteIrp(
                   Irp,
                   STATUS_INVALID_DEVICE_REQUEST,
@@ -271,18 +275,23 @@ jobs:
 
               UNREFERENCED_PARAMETER(DeviceObject);
 
-              stack = IoGetCurrentIrpStackLocation(Irp);
+              stack =
+                  IoGetCurrentIrpStackLocation(Irp);
+
               code =
                   stack->Parameters.DeviceIoControl.IoControlCode;
 
               if (code == IOCTL_DELL_GET_FAN0_RPM) {
+
                   PDELL_RPM_RESULT result;
                   ULONG raw;
-                  ULONG lowWord;
-                  UCHAR carry;
+                  ULONG count;
+                  UCHAR carry = 0;
 
-                  if (stack->Parameters.DeviceIoControl.OutputBufferLength
-                      < sizeof(DELL_RPM_RESULT)) {
+                  if (
+                      stack->Parameters.DeviceIoControl.OutputBufferLength
+                      < sizeof(DELL_RPM_RESULT)
+                     ) {
                       return CompleteIrp(
                           Irp,
                           STATUS_BUFFER_TOO_SMALL,
@@ -294,26 +303,19 @@ jobs:
                       (PDELL_RPM_RESULT)
                       Irp->AssociatedIrp.SystemBuffer;
 
-                  carry = 0;
-                  raw = DellSmmReadFan0(&carry);
-                  lowWord = raw & 0xFFFF;
+                  raw = DellReadFan0(&carry);
+                  count = raw & 0xFFFF;
 
                   result->RawEax = raw;
-                  result->RawCount = lowWord;
-                  result->RpmAssumingMultiplier30 =
-                      lowWord * 30;
+                  result->RawCount = count;
+                  result->Rpm = count * 30;
                   result->CarryFlag = carry;
 
-                  /*
-                   * Same basic invalid-result checks used by
-                   * Linux dell-smm-hwmon:
-                   * - carry flag
-                   * - returned FFFF
-                   * - EAX unchanged from command 02A3
-                   */
-                  if (carry != 0 ||
-                      lowWord == 0xFFFF ||
-                      raw == 0x000002A3) {
+                  if (
+                      carry != 0 ||
+                      count == 0xFFFF ||
+                      raw == 0x000002A3
+                     ) {
                       return CompleteIrp(
                           Irp,
                           STATUS_DEVICE_DATA_ERROR,
@@ -370,9 +372,11 @@ jobs:
 
               UNREFERENCED_PARAMETER(RegistryPath);
 
-              for (i = 0;
-                   i <= IRP_MJ_MAXIMUM_FUNCTION;
-                   ++i) {
+              for (
+                  i = 0;
+                  i <= IRP_MJ_MAXIMUM_FUNCTION;
+                  ++i
+                  ) {
                   DriverObject->MajorFunction[i] =
                       DellUnsupported;
               }
@@ -432,19 +436,24 @@ jobs:
           }
           '@
 
+          $file =
+              "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c"
+
           Set-Content `
-            -Path "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" `
+            -Path $file `
             -Value $source `
             -Encoding ASCII
 
-          Write-Host "=== SOURCE CREATED ==="
-          Get-Item "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" |
+          Write-Host "=== SOURCE ==="
+
+          Get-Item $file |
             Select-Object Name,Length
 
-      - name: Compile and link x86 driver directly
+      - name: Compile and link x86 SYS directly
         shell: powershell
         run: |
-          $batch = "$env:GITHUB_WORKSPACE\build-driver.cmd"
+          $batch =
+              "$env:GITHUB_WORKSPACE\build-driver.cmd"
 
           $content = @"
           @echo off
@@ -454,9 +463,12 @@ jobs:
           if errorlevel 1 exit /b 10
 
           echo.
-          echo ===== COMPILER =====
-          where cl
-          cl 2>&1 | findstr /C:"Compiler Version"
+          echo ===== CL =====
+          where cl.exe
+
+          echo.
+          echo ===== LINK =====
+          where link.exe
 
           echo.
           echo ===== COMPILE =====
@@ -468,11 +480,10 @@ jobs:
             /kernel ^
             /GS- ^
             /Gz ^
-            /Oy- ^
-            /Od ^
             /Zl ^
-            /W4 ^
+            /W3 ^
             /D_X86_=1 ^
+            /DWIN32=1 ^
             /D_WIN32_WINNT=0x0601 ^
             /DNTDDI_VERSION=0x06010000 ^
             /I"$env:KM_INCLUDE" ^
@@ -483,18 +494,16 @@ jobs:
           if errorlevel 1 exit /b 20
 
           echo.
-          echo ===== LINK =====
+          echo ===== LINK DRIVER =====
 
           link.exe ^
             /nologo ^
             /DRIVER:WDM ^
-            /SUBSYSTEM:NATIVE,6.01 ^
+            /SUBSYSTEM:NATIVE ^
             /MACHINE:X86 ^
             /ENTRY:DriverEntry ^
             /NODEFAULTLIB ^
             /INCREMENTAL:NO ^
-            /OPT:REF ^
-            /OPT:ICF ^
             /KERNEL ^
             /OUT:"$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys" ^
             "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" ^
@@ -519,29 +528,30 @@ jobs:
           $code = $LASTEXITCODE
 
           Write-Host ""
-          Write-Host "Build exit code: $code"
+          Write-Host "BUILD EXIT CODE = $code"
 
           if ($code -ne 0) {
-            throw "Direct x86 driver build failed"
+              throw "Direct x86 build failed"
           }
 
-      - name: Verify x86 driver
+      - name: Verify generated driver
         shell: powershell
         run: |
-          $sys = "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
+          $sys =
+              "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
 
           if (-not (Test-Path $sys)) {
-            throw "DellSmmReadOnly.sys was not produced"
+              throw "DellSmmReadOnly.sys not generated"
           }
 
-          $bytes = [System.IO.File]::ReadAllBytes($sys)
-
-          if ($bytes.Length -lt 256) {
-            throw "SYS file is unexpectedly small"
-          }
+          $bytes =
+              [System.IO.File]::ReadAllBytes($sys)
 
           $peOffset =
-              [BitConverter]::ToInt32($bytes, 0x3C)
+              [BitConverter]::ToInt32(
+                  $bytes,
+                  0x3C
+              )
 
           $machine =
               [BitConverter]::ToUInt16(
@@ -549,57 +559,69 @@ jobs:
                   $peOffset + 4
               )
 
-          Write-Host "=== DRIVER ==="
+          Write-Host "=== DRIVER FILE ==="
+
           Get-Item $sys |
             Select-Object Name,Length
 
           Write-Host ""
-          Write-Host ("PE machine = 0x{0:X4}" -f $machine)
+          Write-Host (
+              "PE MACHINE = 0x{0:X4}" -f $machine
+          )
 
           if ($machine -ne 0x014C) {
-              throw "Driver is not x86/i386"
+              throw "Generated driver is not x86"
           }
 
-          Write-Host "Architecture = x86 / i386 -- CORRECT"
+          Write-Host ""
+          Write-Host "ARCHITECTURE = x86 / i386 -- CORRECT"
 
-          $hash = Get-FileHash `
-            $sys `
-            -Algorithm SHA256
+          $hash =
+              Get-FileHash `
+                  $sys `
+                  -Algorithm SHA256
 
           Write-Host ""
           Write-Host "SHA256:"
           Write-Host $hash.Hash
 
+          $artifact =
+              "$env:GITHUB_WORKSPACE\artifact"
+
           New-Item `
             -ItemType Directory `
-            -Path "$env:GITHUB_WORKSPACE\artifact" `
+            -Path $artifact `
             -Force |
             Out-Null
 
           Copy-Item `
             $sys `
-            "$env:GITHUB_WORKSPACE\artifact\" `
-            -Force
+            "$artifact\DellSmmReadOnly.sys"
 
           Copy-Item `
             "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" `
-            "$env:GITHUB_WORKSPACE\artifact\" `
-            -Force
+            "$artifact\DellSmmReadOnly.c"
 
           @"
-          Driver: DellSmmReadOnly.sys
-          Architecture: x86 / i386
-          Functionality: READ ONLY
-          Dell SMM command implemented: 0x02A3 GET FAN SPEED
-          Fan control commands: NONE
-          EC control commands: NONE
-          SHA256: $($hash.Hash)
+          Dell Studio 1558 experimental SMM driver
+          ----------------------------------------
+          Architecture: x86
+          Mode: READ ONLY
+
+          Implemented SMM command:
+          0x02A3 = Read fan RPM
+
+          Fan speed control: NOT IMPLEMENTED
+          BIOS automatic fan control changes: NOT IMPLEMENTED
+
+          SHA256:
+          $($hash.Hash)
           "@ |
             Set-Content `
-              "$env:GITHUB_WORKSPACE\artifact\BUILD-INFO.txt" `
+              "$artifact\BUILD-INFO.txt" `
               -Encoding ASCII
 
-      - name: Upload read-only x86 driver
+      - name: Upload x86 read-only driver
         uses: actions/upload-artifact@v4
         with:
           name: DellSmmReadOnly-x86
