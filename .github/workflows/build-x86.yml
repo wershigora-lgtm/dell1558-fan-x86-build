@@ -177,8 +177,8 @@ jobs:
           $source = @'
           #include <ntddk.h>
 
-          #define DEVICE_NAME L"\Device\DellSmmReadOnly"
-          #define DOS_NAME    L"\DosDevices\DellSmmReadOnly"
+         #define DEVICE_NAME L"\\Device\\DellSmmReadOnly"
+          #define DOS_NAME    L"\\DosDevices\\DellSmmReadOnly"
 
           #define IOCTL_DELL_READ_FAN0 \
               CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
