@@ -1,4 +1,4 @@
-name: Build Dell Studio 1558 x86 RPM driver
+name: Build Dell Studio 1558 x86 RPM driver direct
 
 on:
   workflow_dispatch:
@@ -6,79 +6,127 @@ on:
 jobs:
   build-x86:
     runs-on: windows-2022
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
-      - name: Verify preinstalled NuGet
+      - name: Download official Microsoft SDK and WDK 22621
         shell: powershell
         run: |
-          Write-Host "=== NUGET ==="
-          where.exe nuget
-          nuget help | Select-Object -First 5
+          $sdk = "$env:RUNNER_TEMP\winsdksetup.exe"
+          $wdk = "$env:RUNNER_TEMP\wdksetup.exe"
+
+          Write-Host "Downloading Windows SDK..."
+          & curl.exe `
+            -L `
+            --fail `
+            --retry 3 `
+            --retry-delay 5 `
+            --connect-timeout 30 `
+            --max-time 300 `
+            "https://download.microsoft.com/download/cb9de490-6e67-4ac6-8c2c-6dfabb824e8a/windowssdk/winsdksetup.exe" `
+            -o $sdk
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Preinstalled NuGet is not available"
+            throw "SDK download failed"
           }
 
-      - name: Get Windows 10 x86 WDK 19041
-        shell: powershell
-        run: |
-          $packages = "$env:GITHUB_WORKSPACE\packages"
-
-          nuget install Microsoft.Windows.WDK.x86 `
-            -Version 10.0.19041.5 `
-            -OutputDirectory $packages `
-            -Source "https://api.nuget.org/v3/index.json" `
-            -NonInteractive
+          Write-Host "Downloading Windows WDK..."
+          & curl.exe `
+            -L `
+            --fail `
+            --retry 3 `
+            --retry-delay 5 `
+            --connect-timeout 30 `
+            --max-time 300 `
+            "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
+            -o $wdk
 
           if ($LASTEXITCODE -ne 0) {
-            throw "WDK x86 19041 download failed"
+            throw "WDK download failed"
           }
 
-          Write-Host ""
-          Write-Host "=== PACKAGES ==="
+          Get-Item $sdk,$wdk |
+            Select-Object Name,Length
 
-          Get-ChildItem $packages -Directory |
-            Select-Object Name |
-            Format-Table -AutoSize
-
-      - name: Locate WDK headers and x86 kernel library
+      - name: Install Windows SDK
         shell: powershell
         run: |
-          $packages = "$env:GITHUB_WORKSPACE\packages"
+          $exe = "$env:RUNNER_TEMP\winsdksetup.exe"
 
-          $ntddk = Get-ChildItem $packages `
+          $p = Start-Process `
+            $exe `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
+            -Wait `
+            -PassThru
+
+          Write-Host "SDK exit code: $($p.ExitCode)"
+
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "SDK installation failed"
+          }
+
+      - name: Install Windows WDK
+        shell: powershell
+        run: |
+          $exe = "$env:RUNNER_TEMP\wdksetup.exe"
+
+          $p = Start-Process `
+            $exe `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
+            -Wait `
+            -PassThru
+
+          Write-Host "WDK exit code: $($p.ExitCode)"
+
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "WDK installation failed"
+          }
+
+      - name: Locate x86 kernel headers and libraries
+        shell: powershell
+        run: |
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
+
+          $ntddk = Get-ChildItem `
+            "$kits\Include" `
             -Recurse `
             -File `
             -Filter "ntddk.h" |
+            Where-Object {
+              $_.FullName -match "10\.0\.22621\.0\\km\\ntddk\.h$"
+            } |
             Select-Object -First 1
 
-          $ntdef = Get-ChildItem $packages `
+          $ntdef = Get-ChildItem `
+            "$kits\Include" `
             -Recurse `
             -File `
             -Filter "ntdef.h" |
+            Where-Object {
+              $_.FullName -match "10\.0\.22621\.0\\shared\\ntdef\.h$"
+            } |
             Select-Object -First 1
 
-          $ntoskrnl = Get-ChildItem $packages `
+          $ntoskrnl = Get-ChildItem `
+            "$kits\Lib" `
             -Recurse `
             -File `
             -Filter "ntoskrnl.lib" |
             Where-Object {
-              $_.FullName -match "\\x86\\" -or
-              $_.FullName -match "\\i386\\"
+              $_.FullName -match "10\.0\.22621\.0\\km\\x86\\ntoskrnl\.lib$"
             } |
             Select-Object -First 1
 
           if (-not $ntddk) {
-            throw "ntddk.h not found"
+            throw "ntddk.h 22621 not found"
           }
 
           if (-not $ntdef) {
-            throw "ntdef.h not found"
+            throw "ntdef.h 22621 not found"
           }
 
           if (-not $ntoskrnl) {
-            throw "x86 ntoskrnl.lib not found"
+            throw "x86 ntoskrnl.lib 22621 not found"
           }
 
           $kmInclude = Split-Path $ntddk.FullName
@@ -89,11 +137,7 @@ jobs:
           Write-Host $ntddk.FullName
 
           Write-Host ""
-          Write-Host "=== KM INCLUDE ==="
-          Write-Host $kmInclude
-
-          Write-Host ""
-          Write-Host "=== SHARED INCLUDE ==="
+          Write-Host "=== SHARED ==="
           Write-Host $sharedInclude
 
           Write-Host ""
@@ -109,10 +153,11 @@ jobs:
           "KM_LIB=$kmLib" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Locate x86 MSVC compiler
+      - name: Locate Visual C++ x86 compiler
         shell: powershell
         run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vswhere =
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
           $vs = & $vswhere `
             -latest `
@@ -121,12 +166,11 @@ jobs:
             -property installationPath
 
           if (-not $vs) {
-            throw "Visual C++ installation not found"
+            throw "Visual C++ tools not found"
           }
 
-          $vcvars = Join-Path `
-            $vs `
-            "VC\Auxiliary\Build\vcvars32.bat"
+          $vcvars =
+            Join-Path $vs "VC\Auxiliary\Build\vcvars32.bat"
 
           if (-not (Test-Path $vcvars)) {
             throw "vcvars32.bat not found"
@@ -138,7 +182,7 @@ jobs:
           "VCVARS32=$vcvars" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Create read-only Dell SMM driver
+      - name: Create read-only Dell SMM driver source
         shell: powershell
         run: |
           $source = @'
@@ -150,9 +194,9 @@ jobs:
           #define IOCTL_DELL_GET_FAN0_RPM \
               CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA)
 
-          typedef struct _DELL_RPM_RESULT {
+          typedef struct _DELL_RPM_RESULT
+          {
               ULONG RawEax;
-              ULONG RawCount;
               ULONG Rpm;
               ULONG CarryFlag;
           } DELL_RPM_RESULT, *PDELL_RPM_RESULT;
@@ -172,7 +216,12 @@ jobs:
           {
               Irp->IoStatus.Status = Status;
               Irp->IoStatus.Information = Information;
-              IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+              IoCompleteRequest(
+                  Irp,
+                  IO_NO_INCREMENT
+                  );
+
               return Status;
           }
 
@@ -180,12 +229,11 @@ jobs:
            * READ ONLY.
            *
            * Dell legacy SMM:
-           * EAX = 0x02A3 = read fan speed
-           * EBX = 0      = fan 0
+           * EAX = 0x02A3 -> read fan speed
+           * EBX = 0      -> fan number 0
            *
-           * This version contains NO command for changing
-           * fan speed and NO command for disabling BIOS
-           * automatic fan control.
+           * There is deliberately NO fan-control command
+           * in this driver.
            */
           static ULONG
           DellReadFan0(
@@ -196,16 +244,27 @@ jobs:
               UCHAR carry = 0xFF;
               KAFFINITY oldAffinity;
 
+              /*
+               * Dell legacy SMM must execute on CPU 0.
+               */
               oldAffinity =
-                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
+                  KeSetSystemAffinityThreadEx(
+                      (KAFFINITY)1
+                      );
 
-              if (KeGetCurrentProcessorNumber() != 0) {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
+              if (KeGetCurrentProcessorNumber() != 0)
+              {
+                  KeRevertToUserAffinityThreadEx(
+                      oldAffinity
+                      );
+
                   *CarryFlag = 0xFE;
+
                   return 0xFFFFFFFF;
               }
 
-              __asm {
+              __asm
+              {
                   push ebx
                   push esi
                   push edi
@@ -228,9 +287,12 @@ jobs:
                   pop ebx
               }
 
-              KeRevertToUserAffinityThreadEx(oldAffinity);
+              KeRevertToUserAffinityThreadEx(
+                  oldAffinity
+                  );
 
               *CarryFlag = carry;
+
               return resultEax;
           }
 
@@ -240,7 +302,9 @@ jobs:
               PIRP Irp
               )
           {
-              UNREFERENCED_PARAMETER(DeviceObject);
+              UNREFERENCED_PARAMETER(
+                  DeviceObject
+                  );
 
               return CompleteIrp(
                   Irp,
@@ -255,7 +319,9 @@ jobs:
               PIRP Irp
               )
           {
-              UNREFERENCED_PARAMETER(DeviceObject);
+              UNREFERENCED_PARAMETER(
+                  DeviceObject
+                  );
 
               return CompleteIrp(
                   Irp,
@@ -273,25 +339,30 @@ jobs:
               PIO_STACK_LOCATION stack;
               ULONG code;
 
-              UNREFERENCED_PARAMETER(DeviceObject);
+              UNREFERENCED_PARAMETER(
+                  DeviceObject
+                  );
 
               stack =
-                  IoGetCurrentIrpStackLocation(Irp);
+                  IoGetCurrentIrpStackLocation(
+                      Irp
+                      );
 
               code =
                   stack->Parameters.DeviceIoControl.IoControlCode;
 
-              if (code == IOCTL_DELL_GET_FAN0_RPM) {
-
+              if (code == IOCTL_DELL_GET_FAN0_RPM)
+              {
                   PDELL_RPM_RESULT result;
                   ULONG raw;
-                  ULONG count;
+                  ULONG rpm;
                   UCHAR carry = 0;
 
                   if (
                       stack->Parameters.DeviceIoControl.OutputBufferLength
                       < sizeof(DELL_RPM_RESULT)
-                     ) {
+                     )
+                  {
                       return CompleteIrp(
                           Irp,
                           STATUS_BUFFER_TOO_SMALL,
@@ -303,19 +374,36 @@ jobs:
                       (PDELL_RPM_RESULT)
                       Irp->AssociatedIrp.SystemBuffer;
 
-                  raw = DellReadFan0(&carry);
-                  count = raw & 0xFFFF;
+                  raw =
+                      DellReadFan0(
+                          &carry
+                          );
 
-                  result->RawEax = raw;
-                  result->RawCount = count;
-                  result->Rpm = count * 30;
-                  result->CarryFlag = carry;
+                  rpm =
+                      raw & 0xFFFF;
 
+                  result->RawEax =
+                      raw;
+
+                  result->Rpm =
+                      rpm;
+
+                  result->CarryFlag =
+                      carry;
+
+                  /*
+                   * Dell/Linux validity checks:
+                   *
+                   * 1. carry flag must be clear
+                   * 2. low 16 bits must not be FFFF
+                   * 3. BIOS must change EAX from original 02A3
+                   */
                   if (
                       carry != 0 ||
-                      count == 0xFFFF ||
+                      rpm == 0xFFFF ||
                       raw == 0x000002A3
-                     ) {
+                     )
+                  {
                       return CompleteIrp(
                           Irp,
                           STATUS_DEVICE_DATA_ERROR,
@@ -349,9 +437,12 @@ jobs:
                   DOS_NAME
                   );
 
-              IoDeleteSymbolicLink(&dosName);
+              IoDeleteSymbolicLink(
+                  &dosName
+                  );
 
-              if (DriverObject->DeviceObject != NULL) {
+              if (DriverObject->DeviceObject != NULL)
+              {
                   IoDeleteDevice(
                       DriverObject->DeviceObject
                       );
@@ -370,13 +461,16 @@ jobs:
               NTSTATUS status;
               ULONG i;
 
-              UNREFERENCED_PARAMETER(RegistryPath);
+              UNREFERENCED_PARAMETER(
+                  RegistryPath
+                  );
 
               for (
                   i = 0;
                   i <= IRP_MJ_MAXIMUM_FUNCTION;
                   ++i
-                  ) {
+                  )
+              {
                   DriverObject->MajorFunction[i] =
                       DellUnsupported;
               }
@@ -398,34 +492,42 @@ jobs:
                   DEVICE_NAME
                   );
 
-              status = IoCreateDevice(
-                  DriverObject,
-                  0,
-                  &deviceName,
-                  FILE_DEVICE_UNKNOWN,
-                  FILE_DEVICE_SECURE_OPEN,
-                  FALSE,
-                  &deviceObject
-                  );
+              status =
+                  IoCreateDevice(
+                      DriverObject,
+                      0,
+                      &deviceName,
+                      FILE_DEVICE_UNKNOWN,
+                      FILE_DEVICE_SECURE_OPEN,
+                      FALSE,
+                      &deviceObject
+                      );
 
-              if (!NT_SUCCESS(status)) {
+              if (!NT_SUCCESS(status))
+              {
                   return status;
               }
 
-              deviceObject->Flags |= DO_BUFFERED_IO;
+              deviceObject->Flags |=
+                  DO_BUFFERED_IO;
 
               RtlInitUnicodeString(
                   &dosName,
                   DOS_NAME
                   );
 
-              status = IoCreateSymbolicLink(
-                  &dosName,
-                  &deviceName
-                  );
+              status =
+                  IoCreateSymbolicLink(
+                      &dosName,
+                      &deviceName
+                      );
 
-              if (!NT_SUCCESS(status)) {
-                  IoDeleteDevice(deviceObject);
+              if (!NT_SUCCESS(status))
+              {
+                  IoDeleteDevice(
+                      deviceObject
+                      );
+
                   return status;
               }
 
@@ -444,12 +546,12 @@ jobs:
             -Value $source `
             -Encoding ASCII
 
-          Write-Host "=== SOURCE ==="
+          Write-Host "=== SOURCE CREATED ==="
 
           Get-Item $file |
             Select-Object Name,Length
 
-      - name: Compile and link x86 SYS directly
+      - name: Compile and link x86 driver directly
         shell: powershell
         run: |
           $batch =
@@ -460,26 +562,21 @@ jobs:
           setlocal
 
           call "$env:VCVARS32"
+
           if errorlevel 1 exit /b 10
 
           echo.
-          echo ===== CL =====
+          echo ===== COMPILER =====
           where cl.exe
 
           echo.
-          echo ===== LINK =====
-          where link.exe
-
-          echo.
-          echo ===== COMPILE =====
+          echo ===== COMPILE AND LINK =====
 
           cl.exe ^
             /nologo ^
-            /c ^
             /TC ^
             /kernel ^
             /GS- ^
-            /Gz ^
             /Zl ^
             /W3 ^
             /D_X86_=1 ^
@@ -489,28 +586,18 @@ jobs:
             /I"$env:KM_INCLUDE" ^
             /I"$env:SHARED_INCLUDE" ^
             "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" ^
-            /Fo"$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj"
-
-          if errorlevel 1 exit /b 20
-
-          echo.
-          echo ===== LINK DRIVER =====
-
-          link.exe ^
-            /nologo ^
+            /link ^
             /DRIVER:WDM ^
             /SUBSYSTEM:NATIVE ^
             /MACHINE:X86 ^
             /ENTRY:DriverEntry ^
             /NODEFAULTLIB ^
             /INCREMENTAL:NO ^
-            /KERNEL ^
             /OUT:"$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys" ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" ^
             /LIBPATH:"$env:KM_LIB" ^
             ntoskrnl.lib
 
-          if errorlevel 1 exit /b 30
+          if errorlevel 1 exit /b 20
 
           exit /b 0
           "@
@@ -525,41 +612,51 @@ jobs:
 
           & cmd.exe /d /c $batch
 
-          $code = $LASTEXITCODE
+          $code =
+              $LASTEXITCODE
 
           Write-Host ""
           Write-Host "BUILD EXIT CODE = $code"
 
-          if ($code -ne 0) {
-              throw "Direct x86 build failed"
+          if ($code -ne 0)
+          {
+              throw "Direct x86 driver build failed"
           }
 
-      - name: Verify generated driver
+      - name: Verify generated x86 driver
         shell: powershell
         run: |
           $sys =
               "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
 
-          if (-not (Test-Path $sys)) {
-              throw "DellSmmReadOnly.sys not generated"
+          if (-not (Test-Path $sys))
+          {
+              throw "SYS driver was not generated"
           }
 
           $bytes =
-              [System.IO.File]::ReadAllBytes($sys)
+              [System.IO.File]::ReadAllBytes(
+                  $sys
+                  )
+
+          if ($bytes.Length -lt 256)
+          {
+              throw "SYS driver is unexpectedly small"
+          }
 
           $peOffset =
               [BitConverter]::ToInt32(
                   $bytes,
                   0x3C
-              )
+                  )
 
           $machine =
               [BitConverter]::ToUInt16(
                   $bytes,
                   $peOffset + 4
-              )
+                  )
 
-          Write-Host "=== DRIVER FILE ==="
+          Write-Host "=== DRIVER ==="
 
           Get-Item $sys |
             Select-Object Name,Length
@@ -569,8 +666,9 @@ jobs:
               "PE MACHINE = 0x{0:X4}" -f $machine
           )
 
-          if ($machine -ne 0x014C) {
-              throw "Generated driver is not x86"
+          if ($machine -ne 0x014C)
+          {
+              throw "Driver is not x86/i386"
           }
 
           Write-Host ""
@@ -603,16 +701,19 @@ jobs:
             "$artifact\DellSmmReadOnly.c"
 
           @"
-          Dell Studio 1558 experimental SMM driver
-          ----------------------------------------
-          Architecture: x86
-          Mode: READ ONLY
+          Dell Studio 1558 experimental read-only driver
+          ------------------------------------------------
 
-          Implemented SMM command:
-          0x02A3 = Read fan RPM
+          Architecture: x86 / i386
 
-          Fan speed control: NOT IMPLEMENTED
-          BIOS automatic fan control changes: NOT IMPLEMENTED
+          Implemented Dell SMM command:
+          0x02A3 = READ FAN SPEED
+
+          Fan speed modification:
+          NOT IMPLEMENTED
+
+          BIOS fan-control modification:
+          NOT IMPLEMENTED
 
           SHA256:
           $($hash.Hash)
@@ -621,7 +722,7 @@ jobs:
               "$artifact\BUILD-INFO.txt" `
               -Encoding ASCII
 
-      - name: Upload x86 read-only driver
+      - name: Upload x86 driver artifact
         uses: actions/upload-artifact@v4
         with:
           name: DellSmmReadOnly-x86
