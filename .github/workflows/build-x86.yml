@@ -311,7 +311,7 @@ jobs:
             /DRIVER:WDM ^
             /SUBSYSTEM:NATIVE ^
             /MACHINE:X86 ^
-            /ENTRY:DriverEntry ^
+            /ENTRY:DriverEntry@8 ^
             /NODEFAULTLIB ^
             /INCREMENTAL:NO ^
             /OUT:"$env:GITHUB_WORKSPACE\MinimalX86.sys" ^
