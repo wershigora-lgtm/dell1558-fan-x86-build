@@ -8,31 +8,12 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Download official Microsoft SDK and WDK
+      - name: Download official Microsoft WDK
         shell: powershell
         run: |
-          Invoke-WebRequest `
-            -Uri "https://download.microsoft.com/download/cb9de490-6e67-4ac6-8c2c-6dfabb824e8a/windowssdk/winsdksetup.exe" `
-            -OutFile "$env:TEMP\winsdksetup.exe"
-
           Invoke-WebRequest `
             -Uri "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
             -OutFile "$env:TEMP\wdksetup.exe"
-
-      - name: Install Windows SDK
-        shell: powershell
-        run: |
-          $p = Start-Process `
-            "$env:TEMP\winsdksetup.exe" `
-            -ArgumentList "/Features","+","/Quiet","/NoRestart" `
-            -Wait `
-            -PassThru
-
-          Write-Host "SDK exit code: $($p.ExitCode)"
-
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "Windows SDK installation failed"
-          }
 
       - name: Install Windows Driver Kit
         shell: powershell
@@ -49,6 +30,20 @@ jobs:
             throw "Windows WDK installation failed"
           }
 
+      - name: Verify Windows 10 SDK 19041 exists
+        shell: powershell
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.19041.0"
+
+          Write-Host "Checking:"
+          Write-Host $sdk
+
+          if (-not (Test-Path $sdk)) {
+            throw "Windows 10 SDK 19041 is not installed on runner"
+          }
+
+          Write-Host "Windows 10 SDK 19041 found."
+
       - name: Download original Dell SMM driver source
         shell: powershell
         run: |
@@ -60,7 +55,7 @@ jobs:
           Write-Host "Source commit:"
           git rev-parse HEAD
 
-      - name: Build Release Win32 project directly
+      - name: Build Release Win32 for Windows 10
         shell: powershell
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -91,7 +86,8 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=Win32 `
             /p:TargetVersion=Windows10 `
-            /p:WindowsTargetPlatformVersion=10.0.22621.0 `
+            /p:WindowsTargetPlatformVersion=10.0.19041.0 `
+            /p:_NT_TARGET_VERSION=0x0A000000 `
             /v:minimal
 
           if ($LASTEXITCODE -ne 0) {
