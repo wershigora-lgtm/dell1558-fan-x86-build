@@ -1,4 +1,4 @@
-name: Build Dell SMM x86 with EWDK 20348
+name: Build Dell SMM x86 via NuGet WDK
 
 on:
   workflow_dispatch:
@@ -8,137 +8,263 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Download official Microsoft EWDK 20348
+      - name: Download NuGet
         shell: powershell
         run: |
-          $iso = "$env:RUNNER_TEMP\EWDK20348.iso"
-
-          Write-Host "Downloading official Microsoft EWDK..."
           Invoke-WebRequest `
-            -Uri "https://go.microsoft.com/fwlink/?linkid=2163981" `
-            -OutFile $iso
+            -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" `
+            -OutFile "$env:GITHUB_WORKSPACE\nuget.exe"
 
-          if (-not (Test-Path $iso)) {
-            throw "EWDK ISO download failed"
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\nuget.exe")) {
+            throw "nuget.exe download failed"
           }
 
-          $f = Get-Item $iso
+          Write-Host "NuGet downloaded."
 
-          Write-Host "Downloaded:"
-          Write-Host $f.FullName
-          Write-Host "Size bytes: $($f.Length)"
-
-      - name: Mount EWDK ISO
+      - name: Download official Microsoft x86 WDK package
         shell: powershell
         run: |
-          $iso = "$env:RUNNER_TEMP\EWDK20348.iso"
+          $nuget = "$env:GITHUB_WORKSPACE\nuget.exe"
+          $packages = "$env:GITHUB_WORKSPACE\packages"
 
-          $image = Mount-DiskImage `
-            -ImagePath $iso `
-            -PassThru
+          & $nuget install Microsoft.Windows.WDK.x86 `
+            -Version 10.0.26100.6584 `
+            -OutputDirectory $packages `
+            -Source "https://api.nuget.org/v3/index.json" `
+            -NonInteractive
 
-          Start-Sleep -Seconds 3
+          if ($LASTEXITCODE -ne 0) {
+            throw "WDK NuGet download failed"
+          }
 
-          $volume = $image |
-            Get-Volume |
-            Where-Object { $_.DriveLetter } |
+          Write-Host ""
+          Write-Host "=== DOWNLOADED PACKAGES ==="
+
+          Get-ChildItem $packages -Directory |
+            Select-Object Name |
+            Format-Table -AutoSize
+
+      - name: Locate WDK and SDK build files
+        shell: powershell
+        run: |
+          $packages = "$env:GITHUB_WORKSPACE\packages"
+
+          $wdkProps = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.WDK.x86.props" |
             Select-Object -First 1
 
-          if (-not $volume) {
-            throw "Could not determine EWDK drive letter"
+          $wdkTargets = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.WDK.x86.targets" |
+            Select-Object -First 1
+
+          $sdkProps = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.SDK.cpp.props" |
+            Select-Object -First 1
+
+          $sdkTargets = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.SDK.cpp.targets" |
+            Select-Object -First 1
+
+          $sdkX86Props = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.SDK.cpp.x86.props" |
+            Select-Object -First 1
+
+          $sdkX86Targets = Get-ChildItem $packages -Recurse `
+            -Filter "Microsoft.Windows.SDK.cpp.x86.targets" |
+            Select-Object -First 1
+
+          Write-Host "=== WDK PROPS ==="
+          Write-Host $wdkProps.FullName
+
+          Write-Host "=== WDK TARGETS ==="
+          Write-Host $wdkTargets.FullName
+
+          Write-Host "=== SDK PROPS ==="
+          Write-Host $sdkProps.FullName
+
+          Write-Host "=== SDK TARGETS ==="
+          Write-Host $sdkTargets.FullName
+
+          Write-Host "=== SDK X86 PROPS ==="
+          Write-Host $sdkX86Props.FullName
+
+          Write-Host "=== SDK X86 TARGETS ==="
+          Write-Host $sdkX86Targets.FullName
+
+          if (-not $wdkProps -or
+              -not $wdkTargets -or
+              -not $sdkProps -or
+              -not $sdkTargets -or
+              -not $sdkX86Props -or
+              -not $sdkX86Targets) {
+            throw "One or more NuGet WDK/SDK build files were not found"
           }
 
-          $drive = "$($volume.DriveLetter):"
+          "WDK_PROPS=$($wdkProps.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-          Write-Host "EWDK mounted as:"
-          Write-Host $drive
+          "WDK_TARGETS=$($wdkTargets.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-          if (-not (Test-Path "$drive\LaunchBuildEnv.cmd")) {
-            throw "LaunchBuildEnv.cmd not found on EWDK ISO"
-          }
+          "SDK_PROPS=$($sdkProps.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-          "EWDK_DRIVE=$drive" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
+          "SDK_TARGETS=$($sdkTargets.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Inspect EWDK
+          "SDK_X86_PROPS=$($sdkX86Props.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          "SDK_X86_TARGETS=$($sdkX86Targets.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify ntddk and x86 libraries
         shell: powershell
         run: |
-          Write-Host "EWDK drive:"
-          Write-Host $env:EWDK_DRIVE
+          $packages = "$env:GITHUB_WORKSPACE\packages"
+
+          Write-Host "=== NTDDK.H ==="
+
+          $ntddk = Get-ChildItem $packages -Recurse `
+            -Filter "ntddk.h" |
+            Select-Object -First 10
+
+          $ntddk |
+            Select-Object FullName |
+            Format-Table -AutoSize
+
+          if (-not $ntddk) {
+            throw "ntddk.h not found in NuGet WDK"
+          }
 
           Write-Host ""
-          Write-Host "=== ROOT ==="
+          Write-Host "=== X86 KM LIBRARIES ==="
 
-          Get-ChildItem "$env:EWDK_DRIVE\" |
-            Select-Object Name,Length
+          $libs = Get-ChildItem $packages -Recurse `
+            -Filter "*.lib" |
+            Where-Object {
+              $_.FullName -match "\\km\\x86\\" -or
+              $_.FullName -match "\\x86\\km\\"
+            } |
+            Select-Object -First 30
 
-          Write-Host ""
-          Write-Host "=== LaunchBuildEnv ==="
+          $libs |
+            Select-Object FullName |
+            Format-Table -AutoSize
 
-          Get-Item "$env:EWDK_DRIVE\LaunchBuildEnv.cmd" |
-            Select-Object FullName,Length
+          if (-not $libs) {
+            throw "x86 kernel libraries not found"
+          }
 
       - name: Download original Dell SMM driver source
         shell: powershell
         run: |
           git clone --depth 1 `
-            https://github.com/424778940z/bzh-windrv-dell-smm-io.git src
+            https://github.com/424778940z/bzh-windrv-dell-smm-io.git `
+            src
 
           Set-Location src
 
           Write-Host "Source commit:"
           git rev-parse HEAD
 
-      - name: Build Release Win32 inside EWDK
+      - name: Patch driver project for NuGet WDK x86
         shell: powershell
         run: |
-          $project = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+          $project = "$env:GITHUB_WORKSPACE\src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
 
-          $batch = Join-Path `
-            $env:RUNNER_TEMP `
-            "build-ewdk.cmd"
+          $text = Get-Content $project -Raw
 
-          @"
-          @echo off
-          call $env:EWDK_DRIVE\LaunchBuildEnv.cmd
-          if errorlevel 1 exit /b %errorlevel%
+          $cppDefault = '<Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />'
+          $cppTargets = '<Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />'
 
-          echo.
-          echo ===== MSBUILD LOCATION =====
-          where msbuild
-          echo.
-
-          echo ===== BUILDING WIN32 DRIVER =====
-
-          msbuild "$project" /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:TargetVersion=Windows10 /p:SignMode=Off /v:minimal
-
-          exit /b %errorlevel%
-          "@ | Set-Content `
-            -Path $batch `
-            -Encoding ASCII
-
-          Write-Host "Running:"
-          Get-Content $batch
-
-          & cmd.exe /d /c $batch
-
-          $code = $LASTEXITCODE
-
-          Write-Host ""
-          Write-Host "MSBuild exit code: $code"
-
-          if ($code -ne 0) {
-            throw "EWDK Win32 driver build failed"
+          if (-not $text.Contains($cppDefault)) {
+            throw "Microsoft.Cpp.Default.props import not found"
           }
 
-      - name: Find built driver
+          if (-not $text.Contains($cppTargets)) {
+            throw "Microsoft.Cpp.targets import not found"
+          }
+
+          $props = @"
+            <Import Project="$env:WDK_PROPS" />
+            <Import Project="$env:SDK_X86_PROPS" />
+            <Import Project="$env:SDK_PROPS" />
+          "@
+
+          $targets = @"
+            <Import Project="$env:SDK_TARGETS" />
+            <Import Project="$env:SDK_X86_TARGETS" />
+            <Import Project="$env:WDK_TARGETS" />
+          "@
+
+          $text = $text.Replace(
+            $cppDefault,
+            "$props`r`n  $cppDefault"
+          )
+
+          $text = $text.Replace(
+            $cppTargets,
+            "$cppTargets`r`n$targets"
+          )
+
+          Set-Content `
+            -Path $project `
+            -Value $text `
+            -Encoding UTF8
+
+          Write-Host "=== PATCHED PROJECT IMPORTS ==="
+
+          Select-String `
+            -Path $project `
+            -Pattern "Microsoft.Windows.WDK|Microsoft.Windows.SDK" |
+            ForEach-Object { $_.Line }
+
+      - name: Build Release Win32
         shell: powershell
         run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $msbuild = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" |
+            Select-Object -First 1
+
+          if (-not $msbuild) {
+            throw "MSBuild not found"
+          }
+
+          Write-Host "Using:"
+          Write-Host $msbuild
+
+          $project = "$env:GITHUB_WORKSPACE\src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+
+          & $msbuild `
+            $project `
+            /m `
+            /t:Rebuild `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:TargetVersion=Windows10 `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /p:SignMode=Off `
+            /v:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "x86 driver build failed"
+          }
+
+      - name: Collect and verify driver
+        shell: powershell
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:GITHUB_WORKSPACE\artifact" `
+            -Force |
+            Out-Null
+
           $sysfiles = Get-ChildItem `
             "$env:GITHUB_WORKSPACE\src" `
             -Recurse `
@@ -146,20 +272,8 @@ jobs:
             -Filter "*.sys"
 
           if (-not $sysfiles) {
-            throw "No SYS file was produced"
+            throw "No SYS driver produced"
           }
-
-          Write-Host "=== SYS FILES ==="
-
-          $sysfiles |
-            Select-Object FullName,Length |
-            Format-Table -AutoSize
-
-          New-Item `
-            -ItemType Directory `
-            -Path "$env:GITHUB_WORKSPACE\artifact" `
-            -Force |
-            Out-Null
 
           foreach ($sys in $sysfiles) {
             Copy-Item `
@@ -168,36 +282,25 @@ jobs:
               -Force
           }
 
-      - name: Verify x86 PE architecture and SHA256
-        shell: powershell
-        run: |
-          $sysfiles = Get-ChildItem `
-            "$env:GITHUB_WORKSPACE\artifact" `
-            -Filter "*.sys"
-
-          foreach ($sys in $sysfiles) {
+          foreach ($sys in (Get-ChildItem "$env:GITHUB_WORKSPACE\artifact" -Filter "*.sys")) {
 
             Write-Host ""
-            Write-Host "======================================"
+            Write-Host "=================================="
             Write-Host "FILE: $($sys.Name)"
-            Write-Host "======================================"
+            Write-Host "=================================="
 
             $bytes = [System.IO.File]::ReadAllBytes($sys.FullName)
 
-            if ($bytes.Length -lt 256) {
-              throw "SYS file is unexpectedly small"
-            }
-
             $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-            $machine  = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
 
-            Write-Host ("PE Machine: 0x{0:X4}" -f $machine)
+            Write-Host ("PE machine: 0x{0:X4}" -f $machine)
 
             if ($machine -eq 0x014C) {
-              Write-Host "Architecture: x86 / i386 - CORRECT"
+              Write-Host "Architecture: x86 / i386 -- CORRECT"
             }
             elseif ($machine -eq 0x8664) {
-              throw "Driver is x64, not x86"
+              throw "Built driver is x64 instead of x86"
             }
             else {
               throw ("Unexpected PE machine type: 0x{0:X4}" -f $machine)
@@ -207,7 +310,6 @@ jobs:
               $sys.FullName `
               -Algorithm SHA256
 
-            Write-Host ""
             Write-Host "SHA256:"
             Write-Host $hash.Hash
           }
@@ -215,6 +317,6 @@ jobs:
       - name: Upload x86 driver artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dell-smm-x86-ewdk20348
+          name: dell-smm-x86-nuget
           path: artifact
           if-no-files-found: error
