@@ -1,4 +1,4 @@
-name: Build Dell Studio 1558 x86 RPM driver direct
+name: Test minimal x86 kernel driver
 
 on:
   workflow_dispatch:
@@ -82,7 +82,7 @@ jobs:
             throw "WDK installation failed"
           }
 
-      - name: Locate x86 kernel headers and libraries
+      - name: Locate x86 kernel headers and library
         shell: powershell
         run: |
           $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
@@ -137,11 +137,11 @@ jobs:
           Write-Host $ntddk.FullName
 
           Write-Host ""
-          Write-Host "=== SHARED ==="
+          Write-Host "=== SHARED INCLUDE ==="
           Write-Host $sharedInclude
 
           Write-Host ""
-          Write-Host "=== NTOSKRNL X86 ==="
+          Write-Host "=== X86 NTOSKRNL ==="
           Write-Host $ntoskrnl.FullName
 
           "KM_INCLUDE=$kmInclude" |
@@ -182,380 +182,44 @@ jobs:
           "VCVARS32=$vcvars" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Create read-only Dell SMM driver source
+      - name: Create absolutely minimal x86 driver source
         shell: powershell
         run: |
           $source = @'
           #include <ntddk.h>
 
-          #define DEVICE_NAME L"\Device\DellSmmReadOnly"
-          #define DOS_NAME    L"\DosDevices\DellSmmReadOnly"
-
-          #define IOCTL_DELL_GET_FAN0_RPM \
-              CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA)
-
-          typedef struct _DELL_RPM_RESULT
-          {
-              ULONG RawEax;
-              ULONG Rpm;
-              ULONG CarryFlag;
-          } DELL_RPM_RESULT, *PDELL_RPM_RESULT;
-
           DRIVER_INITIALIZE DriverEntry;
-          DRIVER_UNLOAD DellUnload;
-          DRIVER_DISPATCH DellCreateClose;
-          DRIVER_DISPATCH DellUnsupported;
-          DRIVER_DISPATCH DellDeviceControl;
 
-          static NTSTATUS
-          CompleteIrp(
-              PIRP Irp,
-              NTSTATUS Status,
-              ULONG_PTR Information
-              )
-          {
-              Irp->IoStatus.Status = Status;
-              Irp->IoStatus.Information = Information;
-
-              IoCompleteRequest(
-                  Irp,
-                  IO_NO_INCREMENT
-                  );
-
-              return Status;
-          }
-
-          /*
-           * READ ONLY.
-           *
-           * Dell legacy SMM:
-           * EAX = 0x02A3 -> read fan speed
-           * EBX = 0      -> fan number 0
-           *
-           * There is deliberately NO fan-control command
-           * in this driver.
-           */
-          static ULONG
-          DellReadFan0(
-              PUCHAR CarryFlag
-              )
-          {
-              ULONG resultEax = 0xFFFFFFFF;
-              UCHAR carry = 0xFF;
-              KAFFINITY oldAffinity;
-
-              /*
-               * Dell legacy SMM must execute on CPU 0.
-               */
-              oldAffinity =
-                  KeSetSystemAffinityThreadEx(
-                      (KAFFINITY)1
-                      );
-
-              if (KeGetCurrentProcessorNumber() != 0)
-              {
-                  KeRevertToUserAffinityThreadEx(
-                      oldAffinity
-                      );
-
-                  *CarryFlag = 0xFE;
-
-                  return 0xFFFFFFFF;
-              }
-
-              __asm
-              {
-                  push ebx
-                  push esi
-                  push edi
-
-                  mov eax, 02A3h
-                  xor ebx, ebx
-                  xor ecx, ecx
-                  xor edx, edx
-                  xor esi, esi
-                  xor edi, edi
-
-                  out 0B2h, al
-                  out 084h, al
-
-                  setc carry
-                  mov resultEax, eax
-
-                  pop edi
-                  pop esi
-                  pop ebx
-              }
-
-              KeRevertToUserAffinityThreadEx(
-                  oldAffinity
-                  );
-
-              *CarryFlag = carry;
-
-              return resultEax;
-          }
-
-          NTSTATUS NTAPI
-          DellCreateClose(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              UNREFERENCED_PARAMETER(
-                  DeviceObject
-                  );
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_SUCCESS,
-                  0
-                  );
-          }
-
-          NTSTATUS NTAPI
-          DellUnsupported(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              UNREFERENCED_PARAMETER(
-                  DeviceObject
-                  );
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_INVALID_DEVICE_REQUEST,
-                  0
-                  );
-          }
-
-          NTSTATUS NTAPI
-          DellDeviceControl(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              PIO_STACK_LOCATION stack;
-              ULONG code;
-
-              UNREFERENCED_PARAMETER(
-                  DeviceObject
-                  );
-
-              stack =
-                  IoGetCurrentIrpStackLocation(
-                      Irp
-                      );
-
-              code =
-                  stack->Parameters.DeviceIoControl.IoControlCode;
-
-              if (code == IOCTL_DELL_GET_FAN0_RPM)
-              {
-                  PDELL_RPM_RESULT result;
-                  ULONG raw;
-                  ULONG rpm;
-                  UCHAR carry = 0;
-
-                  if (
-                      stack->Parameters.DeviceIoControl.OutputBufferLength
-                      < sizeof(DELL_RPM_RESULT)
-                     )
-                  {
-                      return CompleteIrp(
-                          Irp,
-                          STATUS_BUFFER_TOO_SMALL,
-                          0
-                          );
-                  }
-
-                  result =
-                      (PDELL_RPM_RESULT)
-                      Irp->AssociatedIrp.SystemBuffer;
-
-                  raw =
-                      DellReadFan0(
-                          &carry
-                          );
-
-                  rpm =
-                      raw & 0xFFFF;
-
-                  result->RawEax =
-                      raw;
-
-                  result->Rpm =
-                      rpm;
-
-                  result->CarryFlag =
-                      carry;
-
-                  /*
-                   * Dell/Linux validity checks:
-                   *
-                   * 1. carry flag must be clear
-                   * 2. low 16 bits must not be FFFF
-                   * 3. BIOS must change EAX from original 02A3
-                   */
-                  if (
-                      carry != 0 ||
-                      rpm == 0xFFFF ||
-                      raw == 0x000002A3
-                     )
-                  {
-                      return CompleteIrp(
-                          Irp,
-                          STATUS_DEVICE_DATA_ERROR,
-                          sizeof(DELL_RPM_RESULT)
-                          );
-                  }
-
-                  return CompleteIrp(
-                      Irp,
-                      STATUS_SUCCESS,
-                      sizeof(DELL_RPM_RESULT)
-                      );
-              }
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_INVALID_DEVICE_REQUEST,
-                  0
-                  );
-          }
-
-          VOID NTAPI
-          DellUnload(
-              PDRIVER_OBJECT DriverObject
-              )
-          {
-              UNICODE_STRING dosName;
-
-              RtlInitUnicodeString(
-                  &dosName,
-                  DOS_NAME
-                  );
-
-              IoDeleteSymbolicLink(
-                  &dosName
-                  );
-
-              if (DriverObject->DeviceObject != NULL)
-              {
-                  IoDeleteDevice(
-                      DriverObject->DeviceObject
-                      );
-              }
-          }
-
-          NTSTATUS NTAPI
+          _Use_decl_annotations_
+          NTSTATUS
           DriverEntry(
               PDRIVER_OBJECT DriverObject,
               PUNICODE_STRING RegistryPath
               )
           {
-              UNICODE_STRING deviceName;
-              UNICODE_STRING dosName;
-              PDEVICE_OBJECT deviceObject = NULL;
-              NTSTATUS status;
-              ULONG i;
-
-              UNREFERENCED_PARAMETER(
-                  RegistryPath
-                  );
-
-              for (
-                  i = 0;
-                  i <= IRP_MJ_MAXIMUM_FUNCTION;
-                  ++i
-                  )
-              {
-                  DriverObject->MajorFunction[i] =
-                      DellUnsupported;
-              }
-
-              DriverObject->MajorFunction[IRP_MJ_CREATE] =
-                  DellCreateClose;
-
-              DriverObject->MajorFunction[IRP_MJ_CLOSE] =
-                  DellCreateClose;
-
-              DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] =
-                  DellDeviceControl;
-
-              DriverObject->DriverUnload =
-                  DellUnload;
-
-              RtlInitUnicodeString(
-                  &deviceName,
-                  DEVICE_NAME
-                  );
-
-              status =
-                  IoCreateDevice(
-                      DriverObject,
-                      0,
-                      &deviceName,
-                      FILE_DEVICE_UNKNOWN,
-                      FILE_DEVICE_SECURE_OPEN,
-                      FALSE,
-                      &deviceObject
-                      );
-
-              if (!NT_SUCCESS(status))
-              {
-                  return status;
-              }
-
-              deviceObject->Flags |=
-                  DO_BUFFERED_IO;
-
-              RtlInitUnicodeString(
-                  &dosName,
-                  DOS_NAME
-                  );
-
-              status =
-                  IoCreateSymbolicLink(
-                      &dosName,
-                      &deviceName
-                      );
-
-              if (!NT_SUCCESS(status))
-              {
-                  IoDeleteDevice(
-                      deviceObject
-                      );
-
-                  return status;
-              }
-
-              deviceObject->Flags &=
-                  ~DO_DEVICE_INITIALIZING;
+              UNREFERENCED_PARAMETER(DriverObject);
+              UNREFERENCED_PARAMETER(RegistryPath);
 
               return STATUS_SUCCESS;
           }
           '@
 
           $file =
-              "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c"
+            "$env:GITHUB_WORKSPACE\MinimalX86.c"
 
           Set-Content `
             -Path $file `
             -Value $source `
             -Encoding ASCII
 
-          Write-Host "=== SOURCE CREATED ==="
+          Write-Host "=== MINIMAL SOURCE ==="
+          Get-Content $file
 
-          Get-Item $file |
-            Select-Object Name,Length
-
-      - name: Compile and link x86 driver directly
+      - name: Compile minimal driver to OBJ
         shell: powershell
         run: |
           $batch =
-              "$env:GITHUB_WORKSPACE\build-driver.cmd"
+            "$env:GITHUB_WORKSPACE\compile.cmd"
 
           $content = @"
           @echo off
@@ -570,10 +234,11 @@ jobs:
           where cl.exe
 
           echo.
-          echo ===== COMPILE AND LINK =====
+          echo ===== COMPILE ONLY =====
 
           cl.exe ^
             /nologo ^
+            /c ^
             /TC ^
             /kernel ^
             /GS- ^
@@ -585,19 +250,18 @@ jobs:
             /DNTDDI_VERSION=0x06010000 ^
             /I"$env:KM_INCLUDE" ^
             /I"$env:SHARED_INCLUDE" ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" ^
-            /link ^
-            /DRIVER:WDM ^
-            /SUBSYSTEM:NATIVE ^
-            /MACHINE:X86 ^
-            /ENTRY:DriverEntry ^
-            /NODEFAULTLIB ^
-            /INCREMENTAL:NO ^
-            /OUT:"$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys" ^
-            /LIBPATH:"$env:KM_LIB" ^
-            ntoskrnl.lib
+            "$env:GITHUB_WORKSPACE\MinimalX86.c" ^
+            /Fo:"$env:GITHUB_WORKSPACE\MinimalX86.obj"
 
           if errorlevel 1 exit /b 20
+
+          echo.
+          echo ===== OBJECT CREATED =====
+          dir "$env:GITHUB_WORKSPACE\MinimalX86.obj"
+
+          echo.
+          echo ===== DRIVERENTRY SYMBOL =====
+          dumpbin.exe /symbols "$env:GITHUB_WORKSPACE\MinimalX86.obj" | findstr /i DriverEntry
 
           exit /b 0
           "@
@@ -607,84 +271,138 @@ jobs:
             -Value $content `
             -Encoding ASCII
 
-          Write-Host "=== BUILD SCRIPT ==="
           Get-Content $batch
 
           & cmd.exe /d /c $batch
 
-          $code =
-              $LASTEXITCODE
+          $code = $LASTEXITCODE
 
           Write-Host ""
-          Write-Host "BUILD EXIT CODE = $code"
+          Write-Host "COMPILE EXIT CODE = $code"
 
-          if ($code -ne 0)
-          {
-              throw "Direct x86 driver build failed"
+          if ($code -ne 0) {
+            throw "Minimal x86 C compilation failed"
           }
 
-      - name: Verify generated x86 driver
+      - name: Link minimal OBJ to SYS
+        shell: powershell
+        run: |
+          $batch =
+            "$env:GITHUB_WORKSPACE\link.cmd"
+
+          $content = @"
+          @echo off
+          setlocal
+
+          call "$env:VCVARS32"
+
+          if errorlevel 1 exit /b 10
+
+          echo.
+          echo ===== LINKER =====
+          where link.exe
+
+          echo.
+          echo ===== LINK DRIVER =====
+
+          link.exe ^
+            /nologo ^
+            /DRIVER:WDM ^
+            /SUBSYSTEM:NATIVE ^
+            /MACHINE:X86 ^
+            /ENTRY:_DriverEntry@8 ^
+            /NODEFAULTLIB ^
+            /INCREMENTAL:NO ^
+            /OUT:"$env:GITHUB_WORKSPACE\MinimalX86.sys" ^
+            /LIBPATH:"$env:KM_LIB" ^
+            "$env:GITHUB_WORKSPACE\MinimalX86.obj" ^
+            ntoskrnl.lib
+
+          if errorlevel 1 exit /b 20
+
+          echo.
+          echo ===== SYS CREATED =====
+          dir "$env:GITHUB_WORKSPACE\MinimalX86.sys"
+
+          exit /b 0
+          "@
+
+          Set-Content `
+            -Path $batch `
+            -Value $content `
+            -Encoding ASCII
+
+          Get-Content $batch
+
+          & cmd.exe /d /c $batch
+
+          $code = $LASTEXITCODE
+
+          Write-Host ""
+          Write-Host "LINK EXIT CODE = $code"
+
+          if ($code -ne 0) {
+            throw "Minimal x86 driver link failed"
+          }
+
+      - name: Verify generated SYS is really x86
         shell: powershell
         run: |
           $sys =
-              "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
+            "$env:GITHUB_WORKSPACE\MinimalX86.sys"
 
-          if (-not (Test-Path $sys))
-          {
-              throw "SYS driver was not generated"
+          if (-not (Test-Path $sys)) {
+            throw "MinimalX86.sys does not exist"
           }
 
           $bytes =
-              [System.IO.File]::ReadAllBytes(
-                  $sys
-                  )
+            [System.IO.File]::ReadAllBytes($sys)
 
-          if ($bytes.Length -lt 256)
-          {
-              throw "SYS driver is unexpectedly small"
+          if ($bytes.Length -lt 256) {
+            throw "SYS file is unexpectedly small"
           }
 
           $peOffset =
-              [BitConverter]::ToInt32(
-                  $bytes,
-                  0x3C
-                  )
+            [BitConverter]::ToInt32(
+              $bytes,
+              0x3C
+            )
 
           $machine =
-              [BitConverter]::ToUInt16(
-                  $bytes,
-                  $peOffset + 4
-                  )
+            [BitConverter]::ToUInt16(
+              $bytes,
+              $peOffset + 4
+            )
 
-          Write-Host "=== DRIVER ==="
+          Write-Host ""
+          Write-Host "===== RESULT ====="
 
           Get-Item $sys |
             Select-Object Name,Length
 
           Write-Host ""
           Write-Host (
-              "PE MACHINE = 0x{0:X4}" -f $machine
+            "PE MACHINE = 0x{0:X4}" -f $machine
           )
 
-          if ($machine -ne 0x014C)
-          {
-              throw "Driver is not x86/i386"
+          if ($machine -ne 0x014C) {
+            throw "Generated driver is NOT x86/i386"
           }
 
           Write-Host ""
-          Write-Host "ARCHITECTURE = x86 / i386 -- CORRECT"
+          Write-Host "SUCCESS: MINIMAL X86 DRIVER WAS BUILT"
 
           $hash =
-              Get-FileHash `
-                  $sys `
-                  -Algorithm SHA256
+            Get-FileHash `
+              $sys `
+              -Algorithm SHA256
 
           Write-Host ""
           Write-Host "SHA256:"
           Write-Host $hash.Hash
 
           $artifact =
-              "$env:GITHUB_WORKSPACE\artifact"
+            "$env:GITHUB_WORKSPACE\artifact"
 
           New-Item `
             -ItemType Directory `
@@ -693,38 +411,20 @@ jobs:
             Out-Null
 
           Copy-Item `
-            $sys `
-            "$artifact\DellSmmReadOnly.sys"
+            "$env:GITHUB_WORKSPACE\MinimalX86.sys" `
+            "$artifact\MinimalX86.sys"
 
           Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" `
-            "$artifact\DellSmmReadOnly.c"
+            "$env:GITHUB_WORKSPACE\MinimalX86.obj" `
+            "$artifact\MinimalX86.obj"
 
-          @"
-          Dell Studio 1558 experimental read-only driver
-          ------------------------------------------------
+          Copy-Item `
+            "$env:GITHUB_WORKSPACE\MinimalX86.c" `
+            "$artifact\MinimalX86.c"
 
-          Architecture: x86 / i386
-
-          Implemented Dell SMM command:
-          0x02A3 = READ FAN SPEED
-
-          Fan speed modification:
-          NOT IMPLEMENTED
-
-          BIOS fan-control modification:
-          NOT IMPLEMENTED
-
-          SHA256:
-          $($hash.Hash)
-          "@ |
-            Set-Content `
-              "$artifact\BUILD-INFO.txt" `
-              -Encoding ASCII
-
-      - name: Upload x86 driver artifact
+      - name: Upload minimal x86 test artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DellSmmReadOnly-x86
+          name: MinimalX86-driver-test
           path: artifact
           if-no-files-found: error
