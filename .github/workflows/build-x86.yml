@@ -1,4 +1,4 @@
-name: Build Dell SMM x86 via NuGet WDK
+name: Build Dell SMM x86 - Microsoft NuGet layout
 
 on:
   workflow_dispatch:
@@ -19,9 +19,7 @@ jobs:
             throw "nuget.exe download failed"
           }
 
-          Write-Host "NuGet downloaded."
-
-      - name: Download official Microsoft x86 WDK package
+      - name: Download Microsoft x86 WDK and dependencies
         shell: powershell
         run: |
           $nuget = "$env:GITHUB_WORKSPACE\nuget.exe"
@@ -29,132 +27,156 @@ jobs:
 
           & $nuget install Microsoft.Windows.WDK.x86 `
             -Version 10.0.26100.6584 `
+            -DependencyVersion Highest `
             -OutputDirectory $packages `
             -Source "https://api.nuget.org/v3/index.json" `
             -NonInteractive
 
           if ($LASTEXITCODE -ne 0) {
-            throw "WDK NuGet download failed"
+            throw "NuGet WDK download failed"
           }
 
           Write-Host ""
-          Write-Host "=== DOWNLOADED PACKAGES ==="
+          Write-Host "=== INSTALLED PACKAGES ==="
 
           Get-ChildItem $packages -Directory |
             Select-Object Name |
             Format-Table -AutoSize
 
-      - name: Locate WDK and SDK build files
+      - name: Locate exact Microsoft build files
         shell: powershell
         run: |
           $packages = "$env:GITHUB_WORKSPACE\packages"
 
-          $wdkProps = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.WDK.x86.props" |
+          $wdkDir = Get-ChildItem $packages -Directory |
+            Where-Object { $_.Name -like "Microsoft.Windows.WDK.x86.*" } |
+            Sort-Object Name -Descending |
             Select-Object -First 1
 
-          $wdkTargets = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.WDK.x86.targets" |
+          $sdkX86Dir = Get-ChildItem $packages -Directory |
+            Where-Object { $_.Name -like "Microsoft.Windows.SDK.CPP.x86.*" } |
+            Sort-Object Name -Descending |
             Select-Object -First 1
 
-          $sdkProps = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.SDK.cpp.props" |
+          $sdkCommonDir = Get-ChildItem $packages -Directory |
+            Where-Object {
+              $_.Name -like "Microsoft.Windows.SDK.CPP.*" -and
+              $_.Name -notlike "Microsoft.Windows.SDK.CPP.x86.*" -and
+              $_.Name -notlike "Microsoft.Windows.SDK.CPP.x64.*" -and
+              $_.Name -notlike "Microsoft.Windows.SDK.CPP.arm*"
+            } |
+            Sort-Object Name -Descending |
             Select-Object -First 1
 
-          $sdkTargets = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.SDK.cpp.targets" |
-            Select-Object -First 1
-
-          $sdkX86Props = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.SDK.cpp.x86.props" |
-            Select-Object -First 1
-
-          $sdkX86Targets = Get-ChildItem $packages -Recurse `
-            -Filter "Microsoft.Windows.SDK.cpp.x86.targets" |
-            Select-Object -First 1
-
-          Write-Host "=== WDK PROPS ==="
-          Write-Host $wdkProps.FullName
-
-          Write-Host "=== WDK TARGETS ==="
-          Write-Host $wdkTargets.FullName
-
-          Write-Host "=== SDK PROPS ==="
-          Write-Host $sdkProps.FullName
-
-          Write-Host "=== SDK TARGETS ==="
-          Write-Host $sdkTargets.FullName
-
-          Write-Host "=== SDK X86 PROPS ==="
-          Write-Host $sdkX86Props.FullName
-
-          Write-Host "=== SDK X86 TARGETS ==="
-          Write-Host $sdkX86Targets.FullName
-
-          if (-not $wdkProps -or
-              -not $wdkTargets -or
-              -not $sdkProps -or
-              -not $sdkTargets -or
-              -not $sdkX86Props -or
-              -not $sdkX86Targets) {
-            throw "One or more NuGet WDK/SDK build files were not found"
+          if (-not $wdkDir) {
+            throw "Microsoft.Windows.WDK.x86 package directory not found"
           }
 
-          "WDK_PROPS=$($wdkProps.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "WDK_TARGETS=$($wdkTargets.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "SDK_PROPS=$($sdkProps.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "SDK_TARGETS=$($sdkTargets.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "SDK_X86_PROPS=$($sdkX86Props.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "SDK_X86_TARGETS=$($sdkX86Targets.FullName)" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Verify ntddk and x86 libraries
-        shell: powershell
-        run: |
-          $packages = "$env:GITHUB_WORKSPACE\packages"
-
-          Write-Host "=== NTDDK.H ==="
-
-          $ntddk = Get-ChildItem $packages -Recurse `
-            -Filter "ntddk.h" |
-            Select-Object -First 10
-
-          $ntddk |
-            Select-Object FullName |
-            Format-Table -AutoSize
-
-          if (-not $ntddk) {
-            throw "ntddk.h not found in NuGet WDK"
+          if (-not $sdkX86Dir) {
+            throw "Microsoft.Windows.SDK.CPP.x86 package directory not found"
           }
+
+          if (-not $sdkCommonDir) {
+            throw "Microsoft.Windows.SDK.CPP common package directory not found"
+          }
+
+          $wdkProps = Join-Path `
+            $wdkDir.FullName `
+            "build\native\Microsoft.Windows.WDK.x86.props"
+
+          $sdkX86Props = Join-Path `
+            $sdkX86Dir.FullName `
+            "build\native\Microsoft.Windows.SDK.cpp.x86.props"
+
+          $sdkCommonProps = Join-Path `
+            $sdkCommonDir.FullName `
+            "build\native\Microsoft.Windows.SDK.cpp.props"
+
+          $sdkCommonTargets = Join-Path `
+            $sdkCommonDir.FullName `
+            "build\native\Microsoft.Windows.SDK.cpp.targets"
+
+          Write-Host "=== WDK x86 PROPS ==="
+          Write-Host $wdkProps
+          Write-Host (Test-Path $wdkProps)
 
           Write-Host ""
-          Write-Host "=== X86 KM LIBRARIES ==="
+          Write-Host "=== SDK x86 PROPS ==="
+          Write-Host $sdkX86Props
+          Write-Host (Test-Path $sdkX86Props)
 
-          $libs = Get-ChildItem $packages -Recurse `
-            -Filter "*.lib" |
+          Write-Host ""
+          Write-Host "=== SDK COMMON PROPS ==="
+          Write-Host $sdkCommonProps
+          Write-Host (Test-Path $sdkCommonProps)
+
+          Write-Host ""
+          Write-Host "=== SDK COMMON TARGETS ==="
+          Write-Host $sdkCommonTargets
+          Write-Host (Test-Path $sdkCommonTargets)
+
+          if (-not (Test-Path $wdkProps)) {
+            throw "WDK x86 props not found"
+          }
+
+          if (-not (Test-Path $sdkX86Props)) {
+            throw "SDK x86 props not found"
+          }
+
+          if (-not (Test-Path $sdkCommonProps)) {
+            throw "SDK common props not found"
+          }
+
+          if (-not (Test-Path $sdkCommonTargets)) {
+            throw "SDK common targets not found"
+          }
+
+          "WDK_X86_PROPS=$wdkProps" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          "SDK_X86_PROPS=$sdkX86Props" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          "SDK_COMMON_PROPS=$sdkCommonProps" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          "SDK_COMMON_TARGETS=$sdkCommonTargets" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify kernel headers
+        shell: powershell
+        run: |
+          $packages = "$env:GITHUB_WORKSPACE\packages"
+
+          $ntddk = Get-ChildItem $packages `
+            -Recurse `
+            -File `
+            -Filter "ntddk.h" |
+            Select-Object -First 1
+
+          if (-not $ntddk) {
+            throw "ntddk.h not found"
+          }
+
+          Write-Host "=== NTDDK.H ==="
+          Write-Host $ntddk.FullName
+
+          $wdf = Get-ChildItem $packages `
+            -Recurse `
+            -File `
+            -Filter "wdf*.lib" |
             Where-Object {
-              $_.FullName -match "\\km\\x86\\" -or
-              $_.FullName -match "\\x86\\km\\"
+              $_.FullName -match "\\x86\\" -or
+              $_.FullName -match "\\i386\\"
             } |
-            Select-Object -First 30
+            Select-Object -First 20
 
-          $libs |
+          Write-Host ""
+          Write-Host "=== X86 WDF LIBRARIES ==="
+
+          $wdf |
             Select-Object FullName |
             Format-Table -AutoSize
-
-          if (-not $libs) {
-            throw "x86 kernel libraries not found"
-          }
 
       - name: Download original Dell SMM driver source
         shell: powershell
@@ -165,60 +187,74 @@ jobs:
 
           Set-Location src
 
-          Write-Host "Source commit:"
+          Write-Host "=== ORIGINAL SOURCE COMMIT ==="
           git rev-parse HEAD
 
-      - name: Patch driver project for NuGet WDK x86
+      - name: Create Microsoft-style WDK NuGet imports
         shell: powershell
         run: |
-          $project = "$env:GITHUB_WORKSPACE\src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+          $propsPath = "$env:GITHUB_WORKSPACE\src\Directory.Build.props"
+          $targetsPath = "$env:GITHUB_WORKSPACE\src\Directory.Build.targets"
 
-          $text = Get-Content $project -Raw
+          $props = @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+            <PropertyGroup>
+              <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+              <TargetFramework>native</TargetFramework>
+              <_NuGetTargetFallbackMoniker>$(_NuGetTargetFallbackMoniker);native,Version=v0.0</_NuGetTargetFallbackMoniker>
+              <RestorePackages>true</RestorePackages>
+            </PropertyGroup>
 
-          $cppDefault = '<Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />'
-          $cppTargets = '<Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />'
+            <Import Project="__SDK_COMMON_PROPS__" />
+            <Import Project="__SDK_X86_PROPS__" />
+            <Import Project="__WDK_X86_PROPS__" />
+          </Project>
+          '@
 
-          if (-not $text.Contains($cppDefault)) {
-            throw "Microsoft.Cpp.Default.props import not found"
-          }
-
-          if (-not $text.Contains($cppTargets)) {
-            throw "Microsoft.Cpp.targets import not found"
-          }
-
-          $props = @"
-            <Import Project="$env:WDK_PROPS" />
-            <Import Project="$env:SDK_X86_PROPS" />
-            <Import Project="$env:SDK_PROPS" />
-          "@
-
-          $targets = @"
-            <Import Project="$env:SDK_TARGETS" />
-            <Import Project="$env:SDK_X86_TARGETS" />
-            <Import Project="$env:WDK_TARGETS" />
-          "@
-
-          $text = $text.Replace(
-            $cppDefault,
-            "$props`r`n  $cppDefault"
+          $props = $props.Replace(
+            "__SDK_COMMON_PROPS__",
+            $env:SDK_COMMON_PROPS
           )
 
-          $text = $text.Replace(
-            $cppTargets,
-            "$cppTargets`r`n$targets"
+          $props = $props.Replace(
+            "__SDK_X86_PROPS__",
+            $env:SDK_X86_PROPS
           )
 
-          Set-Content `
-            -Path $project `
-            -Value $text `
-            -Encoding UTF8
+          $props = $props.Replace(
+            "__WDK_X86_PROPS__",
+            $env:WDK_X86_PROPS
+          )
 
-          Write-Host "=== PATCHED PROJECT IMPORTS ==="
+          $props |
+            Set-Content `
+              -Path $propsPath `
+              -Encoding UTF8
 
-          Select-String `
-            -Path $project `
-            -Pattern "Microsoft.Windows.WDK|Microsoft.Windows.SDK" |
-            ForEach-Object { $_.Line }
+          $targets = @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+            <Import Project="__SDK_COMMON_TARGETS__" />
+          </Project>
+          '@
+
+          $targets = $targets.Replace(
+            "__SDK_COMMON_TARGETS__",
+            $env:SDK_COMMON_TARGETS
+          )
+
+          $targets |
+            Set-Content `
+              -Path $targetsPath `
+              -Encoding UTF8
+
+          Write-Host "=== Directory.Build.props ==="
+          Get-Content $propsPath
+
+          Write-Host ""
+          Write-Host "=== Directory.Build.targets ==="
+          Get-Content $targetsPath
 
       - name: Build Release Win32
         shell: powershell
@@ -236,10 +272,14 @@ jobs:
             throw "MSBuild not found"
           }
 
-          Write-Host "Using:"
+          Write-Host "=== MSBUILD ==="
           Write-Host $msbuild
 
           $project = "$env:GITHUB_WORKSPACE\src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj"
+
+          Write-Host ""
+          Write-Host "=== PROJECT ==="
+          Write-Host $project
 
           & $msbuild `
             $project `
@@ -252,16 +292,23 @@ jobs:
             /p:SignMode=Off `
             /v:minimal
 
-          if ($LASTEXITCODE -ne 0) {
+          $code = $LASTEXITCODE
+
+          Write-Host ""
+          Write-Host "MSBuild exit code: $code"
+
+          if ($code -ne 0) {
             throw "x86 driver build failed"
           }
 
-      - name: Collect and verify driver
+      - name: Collect and verify x86 driver
         shell: powershell
         run: |
+          $artifact = "$env:GITHUB_WORKSPACE\artifact"
+
           New-Item `
             -ItemType Directory `
-            -Path "$env:GITHUB_WORKSPACE\artifact" `
+            -Path $artifact `
             -Force |
             Out-Null
 
@@ -275,24 +322,37 @@ jobs:
             throw "No SYS driver produced"
           }
 
+          Write-Host "=== SYS FILES ==="
+
+          $sysfiles |
+            Select-Object FullName,Length |
+            Format-Table -AutoSize
+
           foreach ($sys in $sysfiles) {
             Copy-Item `
               $sys.FullName `
-              "$env:GITHUB_WORKSPACE\artifact" `
+              $artifact `
               -Force
           }
 
-          foreach ($sys in (Get-ChildItem "$env:GITHUB_WORKSPACE\artifact" -Filter "*.sys")) {
+          foreach ($sys in (Get-ChildItem $artifact -Filter "*.sys")) {
 
             Write-Host ""
-            Write-Host "=================================="
+            Write-Host "======================================"
             Write-Host "FILE: $($sys.Name)"
-            Write-Host "=================================="
+            Write-Host "======================================"
 
             $bytes = [System.IO.File]::ReadAllBytes($sys.FullName)
 
-            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $peOffset = [BitConverter]::ToInt32(
+              $bytes,
+              0x3C
+            )
+
+            $machine = [BitConverter]::ToUInt16(
+              $bytes,
+              $peOffset + 4
+            )
 
             Write-Host ("PE machine: 0x{0:X4}" -f $machine)
 
@@ -300,7 +360,7 @@ jobs:
               Write-Host "Architecture: x86 / i386 -- CORRECT"
             }
             elseif ($machine -eq 0x8664) {
-              throw "Built driver is x64 instead of x86"
+              throw "Built driver is x64, not x86"
             }
             else {
               throw ("Unexpected PE machine type: 0x{0:X4}" -f $machine)
@@ -317,6 +377,6 @@ jobs:
       - name: Upload x86 driver artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dell-smm-x86-nuget
+          name: dell-smm-x86-release
           path: artifact
           if-no-files-found: error
