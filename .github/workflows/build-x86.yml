@@ -1,1 +1,51 @@
+name: Inspect Dell x86 build environment
 
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: windows-2022
+
+    steps:
+      - name: Show Windows and build tools
+        shell: powershell
+        run: |
+          Write-Host "=== WINDOWS ==="
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsArchitecture
+
+          Write-Host ""
+          Write-Host "=== MSBUILD ==="
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe"
+
+          Write-Host ""
+          Write-Host "=== WINDOWS SDKs ==="
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" `
+            -Directory -ErrorAction SilentlyContinue |
+            Select-Object Name
+
+          Write-Host ""
+          Write-Host "=== WINDOWS KIT BUILD FILES ==="
+          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\build" `
+            -Directory -ErrorAction SilentlyContinue |
+            Select-Object Name
+
+      - name: Download original Dell SMM driver source
+        shell: powershell
+        run: |
+          git clone --depth 1 https://github.com/424778940z/bzh-windrv-dell-smm-io.git src
+
+          Write-Host "=== SOURCE DOWNLOADED ==="
+          Get-ChildItem src
+
+      - name: Check Win32 driver configuration
+        shell: powershell
+        run: |
+          Write-Host "=== PROJECT CONFIGURATION ==="
+
+          Select-String `
+            -Path "src\bzh_dell_smm_io\bzh_dell_smm_io.vcxproj" `
+            -Pattern "Win32|PlatformToolset|WindowsTargetPlatformVersion|DriverType" |
+            ForEach-Object { $_.Line }
