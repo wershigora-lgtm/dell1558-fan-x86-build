@@ -13,27 +13,31 @@ jobs:
         run: |
           Write-Host "Downloading Windows SDK 22621..."
           Invoke-WebRequest `
-            -Uri "https://go.microsoft.com/fwlink/?linkid=2311806" `
+            -Uri "https://download.microsoft.com/download/cb9de490-6e67-4ac6-8c2c-6dfabb824e8a/windowssdk/winsdksetup.exe" `
             -OutFile "$env:TEMP\winsdksetup.exe"
 
           Write-Host "Downloading Windows WDK 22621..."
           Invoke-WebRequest `
-            -Uri "https://go.microsoft.com/fwlink/?linkid=2330411" `
+            -Uri "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
             -OutFile "$env:TEMP\wdksetup.exe"
-
-          Get-Item "$env:TEMP\winsdksetup.exe"
-          Get-Item "$env:TEMP\wdksetup.exe"
 
       - name: Install Windows SDK
         shell: powershell
         run: |
+          $log = "$env:TEMP\winsdk-install.log"
+
           $p = Start-Process `
             "$env:TEMP\winsdksetup.exe" `
-            -ArgumentList "/quiet","/norestart" `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart","/Log",$log `
             -Wait `
             -PassThru
 
           Write-Host "SDK installer exit code: $($p.ExitCode)"
+
+          if (Test-Path $log) {
+            Write-Host "=== SDK LOG TAIL ==="
+            Get-Content $log -Tail 80
+          }
 
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "Windows SDK installation failed"
@@ -42,13 +46,20 @@ jobs:
       - name: Install Windows Driver Kit
         shell: powershell
         run: |
+          $log = "$env:TEMP\wdk-install.log"
+
           $p = Start-Process `
             "$env:TEMP\wdksetup.exe" `
-            -ArgumentList "/quiet","/norestart" `
+            -ArgumentList "/Features","+","/Quiet","/NoRestart","/Log",$log `
             -Wait `
             -PassThru
 
           Write-Host "WDK installer exit code: $($p.ExitCode)"
+
+          if (Test-Path $log) {
+            Write-Host "=== WDK LOG TAIL ==="
+            Get-Content $log -Tail 80
+          }
 
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "Windows WDK installation failed"
@@ -57,11 +68,6 @@ jobs:
       - name: Inspect installed SDK and WDK
         shell: powershell
         run: |
-          Write-Host "=== WINDOWS KIT ROOT ==="
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10" `
-            -ErrorAction SilentlyContinue
-
-          Write-Host ""
           Write-Host "=== INCLUDE VERSIONS ==="
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" `
             -Directory -ErrorAction SilentlyContinue |
@@ -82,9 +88,10 @@ jobs:
             Select-Object FullName
 
           Write-Host ""
-          Write-Host "=== KMDF FILES ==="
+          Write-Host "=== KMDF x86 LIBRARIES ==="
           Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10" `
             -Recurse `
             -Filter "Wdf*.lib" `
             -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x86\\" } |
             Select-Object -First 20 FullName
