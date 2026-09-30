@@ -176,6 +176,7 @@ jobs:
         run: |
           $source = @'
           #include <ntddk.h>
+          
          #define DEVICE_NAME L"\\Device\\DellSmmReadOnly"
           #define DOS_NAME    L"\\DosDevices\\DellSmmReadOnly"
 
