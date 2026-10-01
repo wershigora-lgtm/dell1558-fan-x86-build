@@ -1,21 +1,30 @@
-name: Build Dell SMM LOW-test x86 driver
+name: Build Dell Fan Control FINAL x86
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "DellFanControl.c"
+      - "DellFanControlApp.c"
+      - ".github/workflows/build-x86.yml"
 
 jobs:
   build-x86:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download official Microsoft SDK and WDK 22621
         shell: powershell
         run: |
           $sdk = "$env:RUNNER_TEMP\winsdksetup.exe"
           $wdk = "$env:RUNNER_TEMP\wdksetup.exe"
 
-          Write-Host "Downloading Windows SDK..."
           & curl.exe `
             -L `
             --fail `
@@ -25,12 +34,8 @@ jobs:
             --max-time 300 `
             "https://download.microsoft.com/download/cb9de490-6e67-4ac6-8c2c-6dfabb824e8a/windowssdk/winsdksetup.exe" `
             -o $sdk
+          if ($LASTEXITCODE -ne 0) { throw "SDK download failed" }
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "SDK download failed"
-          }
-
-          Write-Host "Downloading Windows WDK..."
           & curl.exe `
             -L `
             --fail `
@@ -40,792 +45,81 @@ jobs:
             --max-time 300 `
             "https://download.microsoft.com/download/03f059f8-d6a3-4b9c-b85b-95cc401be222/wdk/wdksetup.exe" `
             -o $wdk
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "WDK download failed"
-          }
+          if ($LASTEXITCODE -ne 0) { throw "WDK download failed" }
 
       - name: Install Windows SDK
         shell: powershell
         run: |
-          $exe = "$env:RUNNER_TEMP\winsdksetup.exe"
-
           $p = Start-Process `
-            $exe `
+            "$env:RUNNER_TEMP\winsdksetup.exe" `
             -ArgumentList "/Features","+","/Quiet","/NoRestart" `
             -Wait `
             -PassThru
-
-          Write-Host "SDK exit code: $($p.ExitCode)"
-
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "SDK installation failed"
+            throw "SDK installation failed: $($p.ExitCode)"
           }
 
       - name: Install Windows WDK
         shell: powershell
         run: |
-          $exe = "$env:RUNNER_TEMP\wdksetup.exe"
-
           $p = Start-Process `
-            $exe `
+            "$env:RUNNER_TEMP\wdksetup.exe" `
             -ArgumentList "/Features","+","/Quiet","/NoRestart" `
             -Wait `
             -PassThru
-
-          Write-Host "WDK exit code: $($p.ExitCode)"
-
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "WDK installation failed"
+            throw "WDK installation failed: $($p.ExitCode)"
           }
 
-      - name: Locate x86 kernel headers and library
+      - name: Locate x86 toolchain
         shell: powershell
         run: |
           $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
 
-          $ntddk = Get-ChildItem `
-            "$kits\Include" `
-            -Recurse `
-            -File `
-            -Filter "ntddk.h" |
-            Where-Object {
-              $_.FullName -match "10\.0\.22621\.0\\km\\ntddk\.h$"
-            } |
+          $ntddk = Get-ChildItem "$kits\Include" -Recurse -File -Filter ntddk.h |
+            Where-Object { $_.FullName -match "10\.0\.22621\.0\\km\\ntddk\.h$" } |
             Select-Object -First 1
 
-          $ntdef = Get-ChildItem `
-            "$kits\Include" `
-            -Recurse `
-            -File `
-            -Filter "ntdef.h" |
-            Where-Object {
-              $_.FullName -match "10\.0\.22621\.0\\shared\\ntdef\.h$"
-            } |
+          $ntdef = Get-ChildItem "$kits\Include" -Recurse -File -Filter ntdef.h |
+            Where-Object { $_.FullName -match "10\.0\.22621\.0\\shared\\ntdef\.h$" } |
             Select-Object -First 1
 
-          $ntoskrnl = Get-ChildItem `
-            "$kits\Lib" `
-            -Recurse `
-            -File `
-            -Filter "ntoskrnl.lib" |
-            Where-Object {
-              $_.FullName -match "10\.0\.22621\.0\\km\\x86\\ntoskrnl\.lib$"
-            } |
+          $ntoskrnl = Get-ChildItem "$kits\Lib" -Recurse -File -Filter ntoskrnl.lib |
+            Where-Object { $_.FullName -match "10\.0\.22621\.0\\km\\x86\\ntoskrnl\.lib$" } |
             Select-Object -First 1
 
-          if (-not $ntddk) {
-            throw "ntddk.h 22621 not found"
-          }
+          if (-not $ntddk) { throw "ntddk.h 22621 not found" }
+          if (-not $ntdef) { throw "ntdef.h 22621 not found" }
+          if (-not $ntoskrnl) { throw "x86 ntoskrnl.lib 22621 not found" }
 
-          if (-not $ntdef) {
-            throw "ntdef.h 22621 not found"
-          }
-
-          if (-not $ntoskrnl) {
-            throw "x86 ntoskrnl.lib 22621 not found"
-          }
-
-          $kmInclude = Split-Path $ntddk.FullName
-          $sharedInclude = Split-Path $ntdef.FullName
-          $kmLib = Split-Path $ntoskrnl.FullName
-
-          "KM_INCLUDE=$kmInclude" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "SHARED_INCLUDE=$sharedInclude" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-          "KM_LIB=$kmLib" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Locate Visual C++ x86 compiler
-        shell: powershell
-        run: |
-          $vswhere =
-            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere `
             -latest `
             -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
+          if (-not $vs) { throw "Visual C++ tools not found" }
 
-          if (-not $vs) {
-            throw "Visual C++ tools not found"
-          }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars32.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars32.bat not found" }
 
-          $vcvars =
-            Join-Path $vs "VC\Auxiliary\Build\vcvars32.bat"
-
-          if (-not (Test-Path $vcvars)) {
-            throw "vcvars32.bat not found"
-          }
-
+          "KM_INCLUDE=$(Split-Path $ntddk.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SHARED_INCLUDE=$(Split-Path $ntdef.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "KM_LIB=$(Split-Path $ntoskrnl.FullName)" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "VCVARS32=$vcvars" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Create Dell SMM LOW-test driver source
+      - name: Compile final x86 driver
         shell: powershell
         run: |
-          $source = @'
-          #include <ntddk.h>
-
-          #define DEVICE_NAME L"\\Device\\DellSmmLowTest"
-          #define DOS_NAME    L"\\DosDevices\\DellSmmLowTest"
-
-          #define IOCTL_DELL_READ_FAN0 \
-              CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
-
-          #define IOCTL_DELL_TEST_LOW \
-              CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-
-          typedef struct _SMM_RESULT
-          {
-              ULONG Eax;
-              ULONG Ebx;
-              ULONG Ecx;
-              ULONG Edx;
-              ULONG Esi;
-              ULONG Edi;
-              ULONG Carry;
-          } SMM_RESULT, *PSMM_RESULT;
-
-          typedef struct _DELL_READ_RESULT
-          {
-              ULONG RawEax;
-              ULONG Rpm;
-              ULONG CarryFlag;
-              ULONG CpuNumber;
-              ULONG Valid;
-          } DELL_READ_RESULT, *PDELL_READ_RESULT;
-
-          typedef struct _DELL_LOW_TEST_RESULT
-          {
-              ULONG CpuNumber;
-              ULONG StateBefore;
-              ULONG RpmBefore;
-              ULONG SetLowRawEax;
-              ULONG SetLowCarry;
-              ULONG StateDuringLow;
-              ULONG RpmDuringLow;
-              ULONG RestoreRawEax;
-              ULONG RestoreCarry;
-              ULONG StateAfterRestore;
-              ULONG RpmAfterRestore;
-              ULONG Valid;
-          } DELL_LOW_TEST_RESULT, *PDELL_LOW_TEST_RESULT;
-
-          DRIVER_INITIALIZE DriverEntry;
-          DRIVER_UNLOAD DellUnload;
-          DRIVER_DISPATCH DellCreateClose;
-          DRIVER_DISPATCH DellUnsupported;
-          DRIVER_DISPATCH DellDeviceControl;
-
-          static NTSTATUS
-          CompleteIrp(
-              PIRP Irp,
-              NTSTATUS Status,
-              ULONG_PTR Information
-              )
-          {
-              Irp->IoStatus.Status = Status;
-              Irp->IoStatus.Information = Information;
-              IoCompleteRequest(Irp, IO_NO_INCREMENT);
-              return Status;
-          }
-
-          /*
-           * Call Dell legacy SMM while already pinned to CPU 0.
-           * EAX = command
-           * EBX = fan/state selector
-           */
-          static VOID
-          DellSmmCallPinned(
-              ULONG Command,
-              ULONG EbxInput,
-              PSMM_RESULT Result
-              )
-          {
-              ULONG eaxValue = Command;
-              ULONG ebxValue = EbxInput;
-              ULONG ecxValue = 0;
-              ULONG edxValue = 0;
-              ULONG esiValue = 0;
-              ULONG ediValue = 0;
-              UCHAR carry = 0xFF;
-
-              __asm
-              {
-                  push ebx
-                  push esi
-                  push edi
-
-                  mov eax, eaxValue
-                  mov ebx, ebxValue
-                  mov ecx, ecxValue
-                  mov edx, edxValue
-                  mov esi, esiValue
-                  mov edi, ediValue
-
-                  out 0B2h, al
-                  out 084h, al
-
-                  setc carry
-
-                  mov eaxValue, eax
-                  mov ebxValue, ebx
-                  mov ecxValue, ecx
-                  mov edxValue, edx
-                  mov esiValue, esi
-                  mov ediValue, edi
-
-                  pop edi
-                  pop esi
-                  pop ebx
-              }
-
-              Result->Eax = eaxValue;
-              Result->Ebx = ebxValue;
-              Result->Ecx = ecxValue;
-              Result->Edx = edxValue;
-              Result->Esi = esiValue;
-              Result->Edi = ediValue;
-              Result->Carry = (ULONG)carry;
-          }
-
-          static BOOLEAN
-          DellReadIsValid(
-              ULONG OriginalCommand,
-              PSMM_RESULT Result
-              )
-          {
-              if (Result->Carry != 0)
-              {
-                  return FALSE;
-              }
-
-              if (Result->Eax == OriginalCommand)
-              {
-                  return FALSE;
-              }
-
-              if ((Result->Eax & 0xFFFF) == 0xFFFF)
-              {
-                  return FALSE;
-              }
-
-              return TRUE;
-          }
-
-          static VOID
-          Delay1500ms(VOID)
-          {
-              LARGE_INTEGER interval;
-
-              interval.QuadPart = -15000000LL;
-
-              KeDelayExecutionThread(
-                  KernelMode,
-                  FALSE,
-                  &interval
-                  );
-          }
-
-          static VOID
-          DellReadFan0(
-              PDELL_READ_RESULT Result
-              )
-          {
-              KAFFINITY oldAffinity;
-              SMM_RESULT rpmResult;
-
-              RtlZeroMemory(
-                  Result,
-                  sizeof(*Result)
-                  );
-
-              Result->CarryFlag = 0xFFFFFFFF;
-              Result->CpuNumber = 0xFFFFFFFF;
-
-              oldAffinity =
-                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
-
-              Result->CpuNumber =
-                  KeGetCurrentProcessorNumber();
-
-              if (Result->CpuNumber != 0)
-              {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  Result->CarryFlag = 0xFE;
-                  return;
-              }
-
-              DellSmmCallPinned(
-                  0x000002A3,
-                  0,
-                  &rpmResult
-                  );
-
-              KeRevertToUserAffinityThreadEx(oldAffinity);
-
-              Result->RawEax = rpmResult.Eax;
-              Result->Rpm = rpmResult.Eax & 0xFFFF;
-              Result->CarryFlag = rpmResult.Carry;
-
-              if (DellReadIsValid(0x000002A3, &rpmResult))
-              {
-                  Result->Valid = 1;
-              }
-          }
-
-          /*
-           * SHORT REVERSIBLE TEST:
-           *
-           * 1. Read fan state and RPM.
-           * 2. If current state is 2 or 3, request state 1 (LOW).
-           * 3. Wait 1.5 seconds.
-           * 4. Read state and RPM.
-           * 5. Restore the original state.
-           * 6. Wait 1.5 seconds.
-           * 7. Read state and RPM again.
-           *
-           * This driver DOES NOT disable BIOS automatic fan control.
-           * It DOES NOT use Dell commands 0x30A3/0x31A3/0x34A3/0x35A3.
-           * It NEVER requests fan state 0 (OFF).
-           */
-          static VOID
-          DellTestLowFan0(
-              PDELL_LOW_TEST_RESULT Result
-              )
-          {
-              KAFFINITY oldAffinity;
-              SMM_RESULT stateBefore;
-              SMM_RESULT rpmBefore;
-              SMM_RESULT setLow;
-              SMM_RESULT stateLow;
-              SMM_RESULT rpmLow;
-              SMM_RESULT restore;
-              SMM_RESULT stateAfter;
-              SMM_RESULT rpmAfter;
-              ULONG originalState;
-              ULONG restoreEbx;
-
-              RtlZeroMemory(
-                  Result,
-                  sizeof(*Result)
-                  );
-
-              Result->CpuNumber = 0xFFFFFFFF;
-              Result->StateBefore = 0xFFFFFFFF;
-              Result->StateDuringLow = 0xFFFFFFFF;
-              Result->StateAfterRestore = 0xFFFFFFFF;
-              Result->SetLowCarry = 0xFFFFFFFF;
-              Result->RestoreCarry = 0xFFFFFFFF;
-
-              oldAffinity =
-                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
-
-              Result->CpuNumber =
-                  KeGetCurrentProcessorNumber();
-
-              if (Result->CpuNumber != 0)
-              {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  return;
-              }
-
-              DellSmmCallPinned(
-                  0x000000A3,
-                  0,
-                  &stateBefore
-                  );
-
-              DellSmmCallPinned(
-                  0x000002A3,
-                  0,
-                  &rpmBefore
-                  );
-
-              if (
-                  !DellReadIsValid(0x000000A3, &stateBefore) ||
-                  !DellReadIsValid(0x000002A3, &rpmBefore)
-                 )
-              {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  return;
-              }
-
-              originalState =
-                  stateBefore.Eax & 0xFF;
-
-              Result->StateBefore =
-                  originalState;
-
-              Result->RpmBefore =
-                  rpmBefore.Eax & 0xFFFF;
-
-              /*
-               * Only perform a write if the fan reports HIGH (2)
-               * or state 3. We deliberately never request OFF (0).
-               */
-              if (
-                  originalState != 2 &&
-                  originalState != 3
-                 )
-              {
-                  Result->Valid = 2;
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  return;
-              }
-
-              /*
-               * Set fan 0 to state 1 (LOW):
-               * EBX low byte  = fan number 0
-               * EBX second byte = state 1
-               */
-              DellSmmCallPinned(
-                  0x000001A3,
-                  0x00000100,
-                  &setLow
-                  );
-
-              Result->SetLowRawEax =
-                  setLow.Eax;
-
-              Result->SetLowCarry =
-                  setLow.Carry;
-
-              if (setLow.Carry != 0)
-              {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  return;
-              }
-
-              Delay1500ms();
-
-              DellSmmCallPinned(
-                  0x000000A3,
-                  0,
-                  &stateLow
-                  );
-
-              DellSmmCallPinned(
-                  0x000002A3,
-                  0,
-                  &rpmLow
-                  );
-
-              if (DellReadIsValid(0x000000A3, &stateLow))
-              {
-                  Result->StateDuringLow =
-                      stateLow.Eax & 0xFF;
-              }
-
-              if (DellReadIsValid(0x000002A3, &rpmLow))
-              {
-                  Result->RpmDuringLow =
-                      rpmLow.Eax & 0xFFFF;
-              }
-
-              /*
-               * Restore exactly the state that was reported
-               * before the LOW test.
-               */
-              restoreEbx =
-                  (originalState & 0xFF) << 8;
-
-              DellSmmCallPinned(
-                  0x000001A3,
-                  restoreEbx,
-                  &restore
-                  );
-
-              Result->RestoreRawEax =
-                  restore.Eax;
-
-              Result->RestoreCarry =
-                  restore.Carry;
-
-              Delay1500ms();
-
-              DellSmmCallPinned(
-                  0x000000A3,
-                  0,
-                  &stateAfter
-                  );
-
-              DellSmmCallPinned(
-                  0x000002A3,
-                  0,
-                  &rpmAfter
-                  );
-
-              if (DellReadIsValid(0x000000A3, &stateAfter))
-              {
-                  Result->StateAfterRestore =
-                      stateAfter.Eax & 0xFF;
-              }
-
-              if (DellReadIsValid(0x000002A3, &rpmAfter))
-              {
-                  Result->RpmAfterRestore =
-                      rpmAfter.Eax & 0xFFFF;
-              }
-
-              if (
-                  setLow.Carry == 0 &&
-                  restore.Carry == 0
-                 )
-              {
-                  Result->Valid = 1;
-              }
-
-              KeRevertToUserAffinityThreadEx(oldAffinity);
-          }
-
-          NTSTATUS
-          DellCreateClose(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              UNREFERENCED_PARAMETER(DeviceObject);
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_SUCCESS,
-                  0
-                  );
-          }
-
-          NTSTATUS
-          DellUnsupported(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              UNREFERENCED_PARAMETER(DeviceObject);
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_INVALID_DEVICE_REQUEST,
-                  0
-                  );
-          }
-
-          NTSTATUS
-          DellDeviceControl(
-              PDEVICE_OBJECT DeviceObject,
-              PIRP Irp
-              )
-          {
-              PIO_STACK_LOCATION stack;
-              ULONG code;
-
-              UNREFERENCED_PARAMETER(DeviceObject);
-
-              stack =
-                  IoGetCurrentIrpStackLocation(Irp);
-
-              code =
-                  stack->Parameters.DeviceIoControl.IoControlCode;
-
-              if (code == IOCTL_DELL_READ_FAN0)
-              {
-                  PDELL_READ_RESULT result;
-
-                  if (
-                      stack->Parameters.DeviceIoControl.OutputBufferLength
-                      < sizeof(DELL_READ_RESULT)
-                     )
-                  {
-                      return CompleteIrp(
-                          Irp,
-                          STATUS_BUFFER_TOO_SMALL,
-                          0
-                          );
-                  }
-
-                  result =
-                      (PDELL_READ_RESULT)
-                      Irp->AssociatedIrp.SystemBuffer;
-
-                  DellReadFan0(result);
-
-                  return CompleteIrp(
-                      Irp,
-                      STATUS_SUCCESS,
-                      sizeof(DELL_READ_RESULT)
-                      );
-              }
-
-              if (code == IOCTL_DELL_TEST_LOW)
-              {
-                  PDELL_LOW_TEST_RESULT result;
-
-                  if (
-                      stack->Parameters.DeviceIoControl.OutputBufferLength
-                      < sizeof(DELL_LOW_TEST_RESULT)
-                     )
-                  {
-                      return CompleteIrp(
-                          Irp,
-                          STATUS_BUFFER_TOO_SMALL,
-                          0
-                          );
-                  }
-
-                  result =
-                      (PDELL_LOW_TEST_RESULT)
-                      Irp->AssociatedIrp.SystemBuffer;
-
-                  DellTestLowFan0(result);
-
-                  return CompleteIrp(
-                      Irp,
-                      STATUS_SUCCESS,
-                      sizeof(DELL_LOW_TEST_RESULT)
-                      );
-              }
-
-              return CompleteIrp(
-                  Irp,
-                  STATUS_INVALID_DEVICE_REQUEST,
-                  0
-                  );
-          }
-
-          VOID
-          DellUnload(
-              PDRIVER_OBJECT DriverObject
-              )
-          {
-              UNICODE_STRING dosName;
-
-              RtlInitUnicodeString(
-                  &dosName,
-                  DOS_NAME
-                  );
-
-              IoDeleteSymbolicLink(
-                  &dosName
-                  );
-
-              if (DriverObject->DeviceObject != NULL)
-              {
-                  IoDeleteDevice(
-                      DriverObject->DeviceObject
-                      );
-              }
-          }
-
-          NTSTATUS
-          DriverEntry(
-              PDRIVER_OBJECT DriverObject,
-              PUNICODE_STRING RegistryPath
-              )
-          {
-              UNICODE_STRING deviceName;
-              UNICODE_STRING dosName;
-              PDEVICE_OBJECT deviceObject = NULL;
-              NTSTATUS status;
-              ULONG i;
-
-              UNREFERENCED_PARAMETER(RegistryPath);
-
-              for (
-                  i = 0;
-                  i <= IRP_MJ_MAXIMUM_FUNCTION;
-                  ++i
-                  )
-              {
-                  DriverObject->MajorFunction[i] =
-                      DellUnsupported;
-              }
-
-              DriverObject->MajorFunction[IRP_MJ_CREATE] =
-                  DellCreateClose;
-
-              DriverObject->MajorFunction[IRP_MJ_CLOSE] =
-                  DellCreateClose;
-
-              DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] =
-                  DellDeviceControl;
-
-              DriverObject->DriverUnload =
-                  DellUnload;
-
-              RtlInitUnicodeString(
-                  &deviceName,
-                  DEVICE_NAME
-                  );
-
-              status =
-                  IoCreateDevice(
-                      DriverObject,
-                      0,
-                      &deviceName,
-                      FILE_DEVICE_UNKNOWN,
-                      FILE_DEVICE_SECURE_OPEN,
-                      FALSE,
-                      &deviceObject
-                      );
-
-              if (!NT_SUCCESS(status))
-              {
-                  return status;
-              }
-
-              deviceObject->Flags |= DO_BUFFERED_IO;
-
-              RtlInitUnicodeString(
-                  &dosName,
-                  DOS_NAME
-                  );
-
-              status =
-                  IoCreateSymbolicLink(
-                      &dosName,
-                      &deviceName
-                      );
-
-              if (!NT_SUCCESS(status))
-              {
-                  IoDeleteDevice(deviceObject);
-                  return status;
-              }
-
-              deviceObject->Flags &=
-                  ~DO_DEVICE_INITIALIZING;
-
-              return STATUS_SUCCESS;
-          }
-          '@
-
-          $file =
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c"
-
-          Set-Content `
-            -Path $file `
-            -Value $source `
-            -Encoding ASCII
-
-          Get-Item $file |
-            Select-Object Name,Length
-
-      - name: Compile Dell SMM LOW-test driver
-        shell: powershell
-        run: |
-          $batch =
-            "$env:GITHUB_WORKSPACE\compile.cmd"
-
+          $batch = "$env:GITHUB_WORKSPACE\compile-driver.cmd"
           $content = @"
           @echo off
           setlocal
-
           call "$env:VCVARS32"
-
           if errorlevel 1 exit /b 10
 
           cl.exe ^
@@ -843,48 +137,27 @@ jobs:
             /DNTDDI_VERSION=0x06010000 ^
             /I"$env:KM_INCLUDE" ^
             /I"$env:SHARED_INCLUDE" ^
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c" ^
-            /Fo:"$env:GITHUB_WORKSPACE\DellSmmLowTest.obj"
-
+            "$env:GITHUB_WORKSPACE\DellFanControl.c" ^
+            /Fo:"$env:GITHUB_WORKSPACE\DellFanControl.obj"
           if errorlevel 1 exit /b 20
 
-          echo.
-          echo ===== DRIVERENTRY SYMBOL =====
-
-          dumpbin.exe /symbols ^
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" ^
+          dumpbin.exe /symbols "$env:GITHUB_WORKSPACE\DellFanControl.obj" ^
             | findstr /C:"_DriverEntry@8"
-
           if errorlevel 1 exit /b 21
-
-          echo CORRECT X86 STDCALL DRIVERENTRY FOUND
-
           exit /b 0
           "@
-
-          Set-Content `
-            -Path $batch `
-            -Value $content `
-            -Encoding ASCII
-
+          Set-Content $batch $content -Encoding ASCII
           & cmd.exe /d /c $batch
+          if ($LASTEXITCODE -ne 0) { throw "Driver compile failed: $LASTEXITCODE" }
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Dell SMM LOW-test x86 compilation failed"
-          }
-
-      - name: Link Dell SMM LOW-test driver
+      - name: Link final x86 driver
         shell: powershell
         run: |
-          $batch =
-            "$env:GITHUB_WORKSPACE\link.cmd"
-
+          $batch = "$env:GITHUB_WORKSPACE\link-driver.cmd"
           $content = @"
           @echo off
           setlocal
-
           call "$env:VCVARS32"
-
           if errorlevel 1 exit /b 10
 
           link.exe ^
@@ -895,120 +168,186 @@ jobs:
             /ENTRY:DriverEntry@8 ^
             /NODEFAULTLIB ^
             /INCREMENTAL:NO ^
-            /OUT:"$env:GITHUB_WORKSPACE\DellSmmLowTest.sys" ^
+            /OUT:"$env:GITHUB_WORKSPACE\DellFanControl.sys" ^
             /LIBPATH:"$env:KM_LIB" ^
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" ^
+            "$env:GITHUB_WORKSPACE\DellFanControl.obj" ^
             ntoskrnl.lib
-
           if errorlevel 1 exit /b 20
-
           exit /b 0
           "@
-
-          Set-Content `
-            -Path $batch `
-            -Value $content `
-            -Encoding ASCII
-
+          Set-Content $batch $content -Encoding ASCII
           & cmd.exe /d /c $batch
+          if ($LASTEXITCODE -ne 0) { throw "Driver link failed: $LASTEXITCODE" }
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Dell SMM LOW-test x86 link failed"
-          }
-
-      - name: Verify generated driver
+      - name: Compile x86 controller
         shell: powershell
         run: |
-          $sys =
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.sys"
+          $batch = "$env:GITHUB_WORKSPACE\compile-app.cmd"
+          $content = @"
+          @echo off
+          setlocal
+          call "$env:VCVARS32"
+          if errorlevel 1 exit /b 10
 
-          if (-not (Test-Path $sys)) {
-            throw "DellSmmLowTest.sys does not exist"
+          cl.exe ^
+            /nologo ^
+            /TC ^
+            /O2 ^
+            /W3 ^
+            /MT ^
+            /D_WIN32_WINNT=0x0601 ^
+            "$env:GITHUB_WORKSPACE\DellFanControlApp.c" ^
+            /link ^
+            /SUBSYSTEM:CONSOLE ^
+            /MACHINE:X86 ^
+            /OUT:"$env:GITHUB_WORKSPACE\DellFanControl.exe"
+          if errorlevel 1 exit /b 20
+          exit /b 0
+          "@
+          Set-Content $batch $content -Encoding ASCII
+          & cmd.exe /d /c $batch
+          if ($LASTEXITCODE -ne 0) { throw "Controller compile failed: $LASTEXITCODE" }
+
+      - name: Verify binaries and create package
+        shell: powershell
+        run: |
+          $sys = "$env:GITHUB_WORKSPACE\DellFanControl.sys"
+          $exe = "$env:GITHUB_WORKSPACE\DellFanControl.exe"
+
+          foreach ($file in @($sys, $exe)) {
+            if (-not (Test-Path $file)) { throw "Missing output: $file" }
+            $bytes = [System.IO.File]::ReadAllBytes($file)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x014C) { throw "$file is NOT x86/i386" }
           }
 
-          $bytes =
-            [System.IO.File]::ReadAllBytes($sys)
+          $sysHash = (Get-FileHash $sys -Algorithm SHA256).Hash
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          $artifact = "$env:GITHUB_WORKSPACE\artifact"
+          New-Item -ItemType Directory -Path $artifact -Force | Out-Null
 
-          $peOffset =
-            [BitConverter]::ToInt32(
-              $bytes,
-              0x3C
-            )
+          Copy-Item $sys "$artifact\DellFanControl.sys"
+          Copy-Item $exe "$artifact\DellFanControl.exe"
+          Copy-Item "$env:GITHUB_WORKSPACE\DellFanControl.c" "$artifact\DellFanControl.c"
+          Copy-Item "$env:GITHUB_WORKSPACE\DellFanControlApp.c" "$artifact\DellFanControlApp.c"
 
-          $machine =
-            [BitConverter]::ToUInt16(
-              $bytes,
-              $peOffset + 4
-            )
+          @'
+          @echo off
+          setlocal
 
-          if ($machine -ne 0x014C) {
-            throw "Generated driver is NOT x86/i386"
-          }
+          net session >nul 2>&1
+          if errorlevel 1 (
+            echo ERROR: Run INSTALL.cmd as Administrator.
+            pause
+            exit /b 1
+          )
 
-          $hash =
-            Get-FileHash `
-              $sys `
-              -Algorithm SHA256
+          set "DEST=C:\DellFanControl"
+          if not exist "%DEST%" mkdir "%DEST%"
 
-          Write-Host "ARCHITECTURE = x86 / i386"
-          Write-Host "SHA256 = $($hash.Hash)"
+          copy /Y "%~dp0DellFanControl.sys" "%DEST%\DellFanControl.sys" >nul
+          copy /Y "%~dp0DellFanControl.exe" "%DEST%\DellFanControl.exe" >nul
 
-          $artifact =
-            "$env:GITHUB_WORKSPACE\artifact"
+          sc.exe query DellFanControl >nul 2>&1
+          if not errorlevel 1 (
+            sc.exe stop DellFanControl >nul 2>&1
+            sc.exe delete DellFanControl >nul 2>&1
+            timeout /t 1 /nobreak >nul
+          )
 
-          New-Item `
-            -ItemType Directory `
-            -Path $artifact `
-            -Force |
-            Out-Null
+          sc.exe create DellFanControl type= kernel start= auto binPath= C:\DellFanControl\DellFanControl.sys
+          if errorlevel 1 (
+            echo ERROR: Could not create DellFanControl service.
+            pause
+            exit /b 2
+          )
 
-          Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.sys" `
-            "$artifact\DellSmmLowTest.sys"
+          sc.exe start DellFanControl
+          if errorlevel 1 (
+            echo ERROR: Driver did not start.
+            echo Reboot once, then run START-CONTROL.cmd as Administrator.
+            pause
+            exit /b 3
+          )
 
-          Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" `
-            "$artifact\DellSmmLowTest.obj"
+          echo DellFanControl driver installed and running.
+          echo Run START-CONTROL.cmd as Administrator.
+          pause
+          '@ | Set-Content "$artifact\INSTALL.cmd" -Encoding ASCII
 
-          Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c" `
-            "$artifact\DellSmmLowTest.c"
+          @'
+          @echo off
+          net session >nul 2>&1
+          if errorlevel 1 (
+            echo ERROR: Run START-CONTROL.cmd as Administrator.
+            pause
+            exit /b 1
+          )
+          sc.exe start DellFanControl >nul 2>&1
+          C:\DellFanControl\DellFanControl.exe
+          '@ | Set-Content "$artifact\START-CONTROL.cmd" -Encoding ASCII
+
+          @'
+          @echo off
+          net session >nul 2>&1
+          if errorlevel 1 (
+            echo ERROR: Run UNINSTALL.cmd as Administrator.
+            pause
+            exit /b 1
+          )
+          sc.exe stop DellFanControl >nul 2>&1
+          sc.exe delete DellFanControl >nul 2>&1
+          echo DellFanControl service removed.
+          echo Reboot before deleting C:\DellFanControl if the SYS file is still locked.
+          pause
+          '@ | Set-Content "$artifact\UNINSTALL.cmd" -Encoding ASCII
 
           @"
-          Dell Studio 1558 experimental LOW test
-          =======================================
+          Dell Studio 1558 FINAL Fan Control
+          ==================================
 
+          Driver: DellFanControl.sys
+          Controller: DellFanControl.exe
           Architecture: x86 / i386
-          Calling convention: __stdcall (/Gz)
-          Entry point: DriverEntry@8
+          Driver entry point: DriverEntry@8
 
-          Test behavior:
-          1. Read current fan state and RPM.
-          2. Only if current state is 2 or 3:
-             request fan state 1 (LOW).
-          3. Wait 1.5 seconds.
-          4. Read state and RPM.
-          5. Restore the original fan state.
-          6. Wait 1.5 seconds.
-          7. Read state and RPM again.
+          Safety:
+          - fan state 0 / OFF is blocked in the driver
+          - only LOW (1) and HIGH (2) are writable
+          - BIOS automatic-control disable commands are not implemented
+          - BIOS remains active at all times
+          - HOLD-LOW and TARGET modes require valid temperature telemetry
+          - at 85 C the controller requests HIGH and returns to AUTO
+          - loss of temperature telemetry for 3 scans also returns to AUTO
+          - closing the controller stops LOW override pulses
 
-          Fan state 0 (OFF):
-          NEVER REQUESTED
+          Controls:
+          A       AUTO
+          L       HOLD-LOW
+          T       TARGET-RPM
+          + / -   target RPM +/- 100
+          ] / [   pulse interval +/- 25 ms (50..1000 ms)
+          2       HIGH once, then AUTO
+          H       help
+          Q       HIGH once and quit
 
-          BIOS automatic-control disable commands:
-          NOT IMPLEMENTED
-          NOT USED
+          Default pulse interval: 100 ms
+          Temperature safety limit: 85 C
 
-          SHA256:
-          $($hash.Hash)
-          "@ |
-            Set-Content `
-              "$artifact\BUILD-INFO.txt" `
-              -Encoding ASCII
+          DellFanControl.sys SHA256:
+          $sysHash
 
-      - name: Upload Dell SMM LOW-test artifact
+          DellFanControl.exe SHA256:
+          $exeHash
+          "@ | Set-Content "$artifact\BUILD-INFO.txt" -Encoding ASCII
+
+          Write-Host "DellFanControl.sys SHA256 = $sysHash"
+          Write-Host "DellFanControl.exe SHA256 = $exeHash"
+
+      - name: Upload final Dell Fan Control package
         uses: actions/upload-artifact@v4
         with:
-          name: DellSmmLowTest-x86
+          name: DellFanControl-FINAL-x86
           path: artifact
           if-no-files-found: error
