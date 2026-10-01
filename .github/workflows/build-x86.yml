@@ -1,4 +1,4 @@
-name: Build Dell SMM read-only x86 driver
+name: Build Dell SMM LOW-test x86 driver
 
 on:
   workflow_dispatch:
@@ -130,10 +130,6 @@ jobs:
           $sharedInclude = Split-Path $ntdef.FullName
           $kmLib = Split-Path $ntoskrnl.FullName
 
-          Write-Host "NTDDK: $($ntddk.FullName)"
-          Write-Host "SHARED: $sharedInclude"
-          Write-Host "NTOSKRNL X86: $($ntoskrnl.FullName)"
-
           "KM_INCLUDE=$kmInclude" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -166,36 +162,59 @@ jobs:
             throw "vcvars32.bat not found"
           }
 
-          Write-Host "VCVARS32: $vcvars"
-
           "VCVARS32=$vcvars" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Create Dell SMM read-only driver source
+      - name: Create Dell SMM LOW-test driver source
         shell: powershell
         run: |
           $source = @'
           #include <ntddk.h>
-          
-          #define DEVICE_NAME L"\\Device\\DellSmmReadOnly"
-          #define DOS_NAME    L"\\DosDevices\\DellSmmReadOnly"
+
+          #define DEVICE_NAME L"\\Device\\DellSmmLowTest"
+          #define DOS_NAME    L"\\DosDevices\\DellSmmLowTest"
 
           #define IOCTL_DELL_READ_FAN0 \
               CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
 
-          typedef struct _DELL_SMM_RESULT
+          #define IOCTL_DELL_TEST_LOW \
+              CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+
+          typedef struct _SMM_RESULT
+          {
+              ULONG Eax;
+              ULONG Ebx;
+              ULONG Ecx;
+              ULONG Edx;
+              ULONG Esi;
+              ULONG Edi;
+              ULONG Carry;
+          } SMM_RESULT, *PSMM_RESULT;
+
+          typedef struct _DELL_READ_RESULT
           {
               ULONG RawEax;
-              ULONG RawEbx;
-              ULONG RawEcx;
-              ULONG RawEdx;
-              ULONG RawEsi;
-              ULONG RawEdi;
               ULONG Rpm;
               ULONG CarryFlag;
               ULONG CpuNumber;
               ULONG Valid;
-          } DELL_SMM_RESULT, *PDELL_SMM_RESULT;
+          } DELL_READ_RESULT, *PDELL_READ_RESULT;
+
+          typedef struct _DELL_LOW_TEST_RESULT
+          {
+              ULONG CpuNumber;
+              ULONG StateBefore;
+              ULONG RpmBefore;
+              ULONG SetLowRawEax;
+              ULONG SetLowCarry;
+              ULONG StateDuringLow;
+              ULONG RpmDuringLow;
+              ULONG RestoreRawEax;
+              ULONG RestoreCarry;
+              ULONG StateAfterRestore;
+              ULONG RpmAfterRestore;
+              ULONG Valid;
+          } DELL_LOW_TEST_RESULT, *PDELL_LOW_TEST_RESULT;
 
           DRIVER_INITIALIZE DriverEntry;
           DRIVER_UNLOAD DellUnload;
@@ -217,58 +236,24 @@ jobs:
           }
 
           /*
-           * READ-ONLY Dell legacy SMM operation.
-           *
-           * EAX = 0x02A3 : request fan speed
-           * EBX = 0      : fan 0
-           *
-           * This function contains NO command for setting fan speed,
-           * disabling BIOS fan control, or writing an RPM value.
-           *
-           * It is NOT called from DriverEntry.
-           * It runs only after an explicit DeviceIoControl request.
+           * Call Dell legacy SMM while already pinned to CPU 0.
+           * EAX = command
+           * EBX = fan/state selector
            */
           static VOID
-          DellReadFan0(
-              PDELL_SMM_RESULT Result
+          DellSmmCallPinned(
+              ULONG Command,
+              ULONG EbxInput,
+              PSMM_RESULT Result
               )
           {
-              ULONG eaxValue = 0x000002A3;
-              ULONG ebxValue = 0;
+              ULONG eaxValue = Command;
+              ULONG ebxValue = EbxInput;
               ULONG ecxValue = 0;
               ULONG edxValue = 0;
               ULONG esiValue = 0;
               ULONG ediValue = 0;
-
               UCHAR carry = 0xFF;
-              KAFFINITY oldAffinity;
-
-              Result->RawEax = 0;
-              Result->RawEbx = 0;
-              Result->RawEcx = 0;
-              Result->RawEdx = 0;
-              Result->RawEsi = 0;
-              Result->RawEdi = 0;
-              Result->Rpm = 0;
-              Result->CarryFlag = 0xFFFFFFFF;
-              Result->CpuNumber = 0xFFFFFFFF;
-              Result->Valid = 0;
-
-              /*
-               * Run the legacy Dell SMM call on CPU 0.
-               */
-              oldAffinity =
-                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
-
-              Result->CpuNumber =
-                  KeGetCurrentProcessorNumber();
-
-              if (Result->CpuNumber != 0)
-              {
-                  KeRevertToUserAffinityThreadEx(oldAffinity);
-                  Result->CarryFlag = 0xFE;
-                  return;
-              }
 
               __asm
               {
@@ -300,33 +285,303 @@ jobs:
                   pop ebx
               }
 
+              Result->Eax = eaxValue;
+              Result->Ebx = ebxValue;
+              Result->Ecx = ecxValue;
+              Result->Edx = edxValue;
+              Result->Esi = esiValue;
+              Result->Edi = ediValue;
+              Result->Carry = (ULONG)carry;
+          }
+
+          static BOOLEAN
+          DellReadIsValid(
+              ULONG OriginalCommand,
+              PSMM_RESULT Result
+              )
+          {
+              if (Result->Carry != 0)
+              {
+                  return FALSE;
+              }
+
+              if (Result->Eax == OriginalCommand)
+              {
+                  return FALSE;
+              }
+
+              if ((Result->Eax & 0xFFFF) == 0xFFFF)
+              {
+                  return FALSE;
+              }
+
+              return TRUE;
+          }
+
+          static VOID
+          Delay1500ms(VOID)
+          {
+              LARGE_INTEGER interval;
+
+              interval.QuadPart = -15000000LL;
+
+              KeDelayExecutionThread(
+                  KernelMode,
+                  FALSE,
+                  &interval
+                  );
+          }
+
+          static VOID
+          DellReadFan0(
+              PDELL_READ_RESULT Result
+              )
+          {
+              KAFFINITY oldAffinity;
+              SMM_RESULT rpmResult;
+
+              RtlZeroMemory(
+                  Result,
+                  sizeof(*Result)
+                  );
+
+              Result->CarryFlag = 0xFFFFFFFF;
+              Result->CpuNumber = 0xFFFFFFFF;
+
+              oldAffinity =
+                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
+
+              Result->CpuNumber =
+                  KeGetCurrentProcessorNumber();
+
+              if (Result->CpuNumber != 0)
+              {
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
+                  Result->CarryFlag = 0xFE;
+                  return;
+              }
+
+              DellSmmCallPinned(
+                  0x000002A3,
+                  0,
+                  &rpmResult
+                  );
+
               KeRevertToUserAffinityThreadEx(oldAffinity);
 
-              Result->RawEax = eaxValue;
-              Result->RawEbx = ebxValue;
-              Result->RawEcx = ecxValue;
-              Result->RawEdx = edxValue;
-              Result->RawEsi = esiValue;
-              Result->RawEdi = ediValue;
+              Result->RawEax = rpmResult.Eax;
+              Result->Rpm = rpmResult.Eax & 0xFFFF;
+              Result->CarryFlag = rpmResult.Carry;
 
-              Result->Rpm =
-                  eaxValue & 0xFFFF;
+              if (DellReadIsValid(0x000002A3, &rpmResult))
+              {
+                  Result->Valid = 1;
+              }
+          }
 
-              Result->CarryFlag =
-                  (ULONG)carry;
+          /*
+           * SHORT REVERSIBLE TEST:
+           *
+           * 1. Read fan state and RPM.
+           * 2. If current state is 2 or 3, request state 1 (LOW).
+           * 3. Wait 1.5 seconds.
+           * 4. Read state and RPM.
+           * 5. Restore the original state.
+           * 6. Wait 1.5 seconds.
+           * 7. Read state and RPM again.
+           *
+           * This driver DOES NOT disable BIOS automatic fan control.
+           * It DOES NOT use Dell commands 0x30A3/0x31A3/0x34A3/0x35A3.
+           * It NEVER requests fan state 0 (OFF).
+           */
+          static VOID
+          DellTestLowFan0(
+              PDELL_LOW_TEST_RESULT Result
+              )
+          {
+              KAFFINITY oldAffinity;
+              SMM_RESULT stateBefore;
+              SMM_RESULT rpmBefore;
+              SMM_RESULT setLow;
+              SMM_RESULT stateLow;
+              SMM_RESULT rpmLow;
+              SMM_RESULT restore;
+              SMM_RESULT stateAfter;
+              SMM_RESULT rpmAfter;
+              ULONG originalState;
+              ULONG restoreEbx;
+
+              RtlZeroMemory(
+                  Result,
+                  sizeof(*Result)
+                  );
+
+              Result->CpuNumber = 0xFFFFFFFF;
+              Result->StateBefore = 0xFFFFFFFF;
+              Result->StateDuringLow = 0xFFFFFFFF;
+              Result->StateAfterRestore = 0xFFFFFFFF;
+              Result->SetLowCarry = 0xFFFFFFFF;
+              Result->RestoreCarry = 0xFFFFFFFF;
+
+              oldAffinity =
+                  KeSetSystemAffinityThreadEx((KAFFINITY)1);
+
+              Result->CpuNumber =
+                  KeGetCurrentProcessorNumber();
+
+              if (Result->CpuNumber != 0)
+              {
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
+                  return;
+              }
+
+              DellSmmCallPinned(
+                  0x000000A3,
+                  0,
+                  &stateBefore
+                  );
+
+              DellSmmCallPinned(
+                  0x000002A3,
+                  0,
+                  &rpmBefore
+                  );
+
+              if (
+                  !DellReadIsValid(0x000000A3, &stateBefore) ||
+                  !DellReadIsValid(0x000002A3, &rpmBefore)
+                 )
+              {
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
+                  return;
+              }
+
+              originalState =
+                  stateBefore.Eax & 0xFF;
+
+              Result->StateBefore =
+                  originalState;
+
+              Result->RpmBefore =
+                  rpmBefore.Eax & 0xFFFF;
 
               /*
-               * Diagnostic validity test only.
-               * We still return all raw registers to user mode.
+               * Only perform a write if the fan reports HIGH (2)
+               * or state 3. We deliberately never request OFF (0).
                */
               if (
-                  carry == 0 &&
-                  (eaxValue & 0xFFFF) != 0xFFFF &&
-                  eaxValue != 0x000002A3
+                  originalState != 2 &&
+                  originalState != 3
+                 )
+              {
+                  Result->Valid = 2;
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
+                  return;
+              }
+
+              /*
+               * Set fan 0 to state 1 (LOW):
+               * EBX low byte  = fan number 0
+               * EBX second byte = state 1
+               */
+              DellSmmCallPinned(
+                  0x000001A3,
+                  0x00000100,
+                  &setLow
+                  );
+
+              Result->SetLowRawEax =
+                  setLow.Eax;
+
+              Result->SetLowCarry =
+                  setLow.Carry;
+
+              if (setLow.Carry != 0)
+              {
+                  KeRevertToUserAffinityThreadEx(oldAffinity);
+                  return;
+              }
+
+              Delay1500ms();
+
+              DellSmmCallPinned(
+                  0x000000A3,
+                  0,
+                  &stateLow
+                  );
+
+              DellSmmCallPinned(
+                  0x000002A3,
+                  0,
+                  &rpmLow
+                  );
+
+              if (DellReadIsValid(0x000000A3, &stateLow))
+              {
+                  Result->StateDuringLow =
+                      stateLow.Eax & 0xFF;
+              }
+
+              if (DellReadIsValid(0x000002A3, &rpmLow))
+              {
+                  Result->RpmDuringLow =
+                      rpmLow.Eax & 0xFFFF;
+              }
+
+              /*
+               * Restore exactly the state that was reported
+               * before the LOW test.
+               */
+              restoreEbx =
+                  (originalState & 0xFF) << 8;
+
+              DellSmmCallPinned(
+                  0x000001A3,
+                  restoreEbx,
+                  &restore
+                  );
+
+              Result->RestoreRawEax =
+                  restore.Eax;
+
+              Result->RestoreCarry =
+                  restore.Carry;
+
+              Delay1500ms();
+
+              DellSmmCallPinned(
+                  0x000000A3,
+                  0,
+                  &stateAfter
+                  );
+
+              DellSmmCallPinned(
+                  0x000002A3,
+                  0,
+                  &rpmAfter
+                  );
+
+              if (DellReadIsValid(0x000000A3, &stateAfter))
+              {
+                  Result->StateAfterRestore =
+                      stateAfter.Eax & 0xFF;
+              }
+
+              if (DellReadIsValid(0x000002A3, &rpmAfter))
+              {
+                  Result->RpmAfterRestore =
+                      rpmAfter.Eax & 0xFFFF;
+              }
+
+              if (
+                  setLow.Carry == 0 &&
+                  restore.Carry == 0
                  )
               {
                   Result->Valid = 1;
               }
+
+              KeRevertToUserAffinityThreadEx(oldAffinity);
           }
 
           NTSTATUS
@@ -378,11 +633,11 @@ jobs:
 
               if (code == IOCTL_DELL_READ_FAN0)
               {
-                  PDELL_SMM_RESULT result;
+                  PDELL_READ_RESULT result;
 
                   if (
                       stack->Parameters.DeviceIoControl.OutputBufferLength
-                      < sizeof(DELL_SMM_RESULT)
+                      < sizeof(DELL_READ_RESULT)
                      )
                   {
                       return CompleteIrp(
@@ -393,7 +648,7 @@ jobs:
                   }
 
                   result =
-                      (PDELL_SMM_RESULT)
+                      (PDELL_READ_RESULT)
                       Irp->AssociatedIrp.SystemBuffer;
 
                   DellReadFan0(result);
@@ -401,7 +656,36 @@ jobs:
                   return CompleteIrp(
                       Irp,
                       STATUS_SUCCESS,
-                      sizeof(DELL_SMM_RESULT)
+                      sizeof(DELL_READ_RESULT)
+                      );
+              }
+
+              if (code == IOCTL_DELL_TEST_LOW)
+              {
+                  PDELL_LOW_TEST_RESULT result;
+
+                  if (
+                      stack->Parameters.DeviceIoControl.OutputBufferLength
+                      < sizeof(DELL_LOW_TEST_RESULT)
+                     )
+                  {
+                      return CompleteIrp(
+                          Irp,
+                          STATUS_BUFFER_TOO_SMALL,
+                          0
+                          );
+                  }
+
+                  result =
+                      (PDELL_LOW_TEST_RESULT)
+                      Irp->AssociatedIrp.SystemBuffer;
+
+                  DellTestLowFan0(result);
+
+                  return CompleteIrp(
+                      Irp,
+                      STATUS_SUCCESS,
+                      sizeof(DELL_LOW_TEST_RESULT)
                       );
               }
 
@@ -520,19 +804,17 @@ jobs:
           '@
 
           $file =
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c"
 
           Set-Content `
             -Path $file `
             -Value $source `
             -Encoding ASCII
 
-          Write-Host "=== SOURCE CREATED ==="
-
           Get-Item $file |
             Select-Object Name,Length
 
-      - name: Compile Dell SMM driver to OBJ
+      - name: Compile Dell SMM LOW-test driver
         shell: powershell
         run: |
           $batch =
@@ -545,13 +827,6 @@ jobs:
           call "$env:VCVARS32"
 
           if errorlevel 1 exit /b 10
-
-          echo.
-          echo ===== COMPILER =====
-          where cl.exe
-
-          echo.
-          echo ===== COMPILE =====
 
           cl.exe ^
             /nologo ^
@@ -568,8 +843,8 @@ jobs:
             /DNTDDI_VERSION=0x06010000 ^
             /I"$env:KM_INCLUDE" ^
             /I"$env:SHARED_INCLUDE" ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" ^
-            /Fo:"$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c" ^
+            /Fo:"$env:GITHUB_WORKSPACE\DellSmmLowTest.obj"
 
           if errorlevel 1 exit /b 20
 
@@ -577,16 +852,11 @@ jobs:
           echo ===== DRIVERENTRY SYMBOL =====
 
           dumpbin.exe /symbols ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" ^
-            | findstr /i DriverEntry
-
-          dumpbin.exe /symbols ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" ^
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" ^
             | findstr /C:"_DriverEntry@8"
 
           if errorlevel 1 exit /b 21
 
-          echo.
           echo CORRECT X86 STDCALL DRIVERENTRY FOUND
 
           exit /b 0
@@ -599,16 +869,11 @@ jobs:
 
           & cmd.exe /d /c $batch
 
-          $code = $LASTEXITCODE
-
-          Write-Host ""
-          Write-Host "COMPILE EXIT CODE = $code"
-
-          if ($code -ne 0) {
-            throw "Dell SMM x86 compilation failed"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dell SMM LOW-test x86 compilation failed"
           }
 
-      - name: Link Dell SMM OBJ to SYS
+      - name: Link Dell SMM LOW-test driver
         shell: powershell
         run: |
           $batch =
@@ -622,9 +887,6 @@ jobs:
 
           if errorlevel 1 exit /b 10
 
-          echo.
-          echo ===== LINK DRIVER =====
-
           link.exe ^
             /nologo ^
             /DRIVER:WDM ^
@@ -633,16 +895,12 @@ jobs:
             /ENTRY:DriverEntry@8 ^
             /NODEFAULTLIB ^
             /INCREMENTAL:NO ^
-            /OUT:"$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys" ^
+            /OUT:"$env:GITHUB_WORKSPACE\DellSmmLowTest.sys" ^
             /LIBPATH:"$env:KM_LIB" ^
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" ^
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" ^
             ntoskrnl.lib
 
           if errorlevel 1 exit /b 20
-
-          echo.
-          echo ===== SYS CREATED =====
-          dir "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
 
           exit /b 0
           "@
@@ -654,31 +912,22 @@ jobs:
 
           & cmd.exe /d /c $batch
 
-          $code = $LASTEXITCODE
-
-          Write-Host ""
-          Write-Host "LINK EXIT CODE = $code"
-
-          if ($code -ne 0) {
-            throw "Dell SMM x86 link failed"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dell SMM LOW-test x86 link failed"
           }
 
       - name: Verify generated driver
         shell: powershell
         run: |
           $sys =
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.sys"
 
           if (-not (Test-Path $sys)) {
-            throw "DellSmmReadOnly.sys does not exist"
+            throw "DellSmmLowTest.sys does not exist"
           }
 
           $bytes =
             [System.IO.File]::ReadAllBytes($sys)
-
-          if ($bytes.Length -lt 256) {
-            throw "SYS file is unexpectedly small"
-          }
 
           $peOffset =
             [BitConverter]::ToInt32(
@@ -692,31 +941,17 @@ jobs:
               $peOffset + 4
             )
 
-          Write-Host ""
-          Write-Host "===== RESULT ====="
-
-          Get-Item $sys |
-            Select-Object Name,Length
-
-          Write-Host ""
-          Write-Host (
-            "PE MACHINE = 0x{0:X4}" -f $machine
-          )
-
           if ($machine -ne 0x014C) {
             throw "Generated driver is NOT x86/i386"
           }
-
-          Write-Host "ARCHITECTURE = x86 / i386"
 
           $hash =
             Get-FileHash `
               $sys `
               -Algorithm SHA256
 
-          Write-Host ""
-          Write-Host "SHA256:"
-          Write-Host $hash.Hash
+          Write-Host "ARCHITECTURE = x86 / i386"
+          Write-Host "SHA256 = $($hash.Hash)"
 
           $artifact =
             "$env:GITHUB_WORKSPACE\artifact"
@@ -728,45 +963,41 @@ jobs:
             Out-Null
 
           Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.sys" `
-            "$artifact\DellSmmReadOnly.sys"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.sys" `
+            "$artifact\DellSmmLowTest.sys"
 
           Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.obj" `
-            "$artifact\DellSmmReadOnly.obj"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.obj" `
+            "$artifact\DellSmmLowTest.obj"
 
           Copy-Item `
-            "$env:GITHUB_WORKSPACE\DellSmmReadOnly.c" `
-            "$artifact\DellSmmReadOnly.c"
+            "$env:GITHUB_WORKSPACE\DellSmmLowTest.c" `
+            "$artifact\DellSmmLowTest.c"
 
           @"
-          Dell Studio 1558 experimental Dell SMM driver
-          ===============================================
+          Dell Studio 1558 experimental LOW test
+          =======================================
 
-          Architecture:
-          x86 / i386
+          Architecture: x86 / i386
+          Calling convention: __stdcall (/Gz)
+          Entry point: DriverEntry@8
 
-          Calling convention:
-          __stdcall (/Gz)
+          Test behavior:
+          1. Read current fan state and RPM.
+          2. Only if current state is 2 or 3:
+             request fan state 1 (LOW).
+          3. Wait 1.5 seconds.
+          4. Read state and RPM.
+          5. Restore the original fan state.
+          6. Wait 1.5 seconds.
+          7. Read state and RPM again.
 
-          Entry point:
-          DriverEntry@8
+          Fan state 0 (OFF):
+          NEVER REQUESTED
 
-          Implemented SMM operation:
-          READ fan 0 only
-
-          Requested Dell legacy function:
-          EAX = 0x02A3
-          EBX = 0
-
-          Fan speed SET command:
+          BIOS automatic-control disable commands:
           NOT IMPLEMENTED
-
-          BIOS fan-control disable command:
-          NOT IMPLEMENTED
-
-          SMM is NOT called during DriverEntry.
-          Hardware access occurs only after an explicit IOCTL.
+          NOT USED
 
           SHA256:
           $($hash.Hash)
@@ -775,9 +1006,9 @@ jobs:
               "$artifact\BUILD-INFO.txt" `
               -Encoding ASCII
 
-      - name: Upload Dell SMM read-only artifact
+      - name: Upload Dell SMM LOW-test artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DellSmmReadOnly-x86
+          name: DellSmmLowTest-x86
           path: artifact
           if-no-files-found: error
