@@ -80,7 +80,6 @@ DRIVER_DISPATCH DellCreateClose;
 DRIVER_DISPATCH DellUnsupported;
 DRIVER_DISPATCH DellDeviceControl;
 
-static FAST_MUTEX gSmmMutex;
 
 static NTSTATUS
 CompleteIrp(
@@ -208,11 +207,8 @@ DellReadStatus(
     Result->State = 0xFFFFFFFF;
     Result->CpuNumber = 0xFFFFFFFF;
 
-    ExAcquireFastMutex(&gSmmMutex);
-
     if (!PinCpu0(&oldAffinity, &cpuNumber))
     {
-        ExReleaseFastMutex(&gSmmMutex);
         return;
     }
 
@@ -231,7 +227,6 @@ DellReadStatus(
         );
 
     KeRevertToUserAffinityThreadEx(oldAffinity);
-    ExReleaseFastMutex(&gSmmMutex);
 
     if (DellReadIsValid(0x000000A3, &stateResult))
     {
@@ -271,11 +266,8 @@ DellSetState(
         return;
     }
 
-    ExAcquireFastMutex(&gSmmMutex);
-
     if (!PinCpu0(&oldAffinity, &cpuNumber))
     {
-        ExReleaseFastMutex(&gSmmMutex);
         return;
     }
 
@@ -286,7 +278,6 @@ DellSetState(
         );
 
     KeRevertToUserAffinityThreadEx(oldAffinity);
-    ExReleaseFastMutex(&gSmmMutex);
 
     Result->RawEax = setResult.Eax;
     Result->CarryFlag = setResult.Carry;
@@ -319,11 +310,8 @@ DellReadSensor(
         return;
     }
 
-    ExAcquireFastMutex(&gSmmMutex);
-
     if (!PinCpu0(&oldAffinity, &cpuNumber))
     {
-        ExReleaseFastMutex(&gSmmMutex);
         return;
     }
 
@@ -340,7 +328,6 @@ DellReadSensor(
         );
 
     KeRevertToUserAffinityThreadEx(oldAffinity);
-    ExReleaseFastMutex(&gSmmMutex);
 
     temp = tempResult.Eax & 0xFF;
 
@@ -378,11 +365,8 @@ DellReadNominal(
         return;
     }
 
-    ExAcquireFastMutex(&gSmmMutex);
-
     if (!PinCpu0(&oldAffinity, &cpuNumber))
     {
-        ExReleaseFastMutex(&gSmmMutex);
         return;
     }
 
@@ -393,7 +377,6 @@ DellReadNominal(
         );
 
     KeRevertToUserAffinityThreadEx(oldAffinity);
-    ExReleaseFastMutex(&gSmmMutex);
 
     if (DellReadIsValid(0x000004A3, &nominalResult))
     {
@@ -623,8 +606,6 @@ DriverEntry(
 
     UNREFERENCED_PARAMETER(RegistryPath);
 
-    ExInitializeFastMutex(&gSmmMutex);
-
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; ++i)
     {
         DriverObject->MajorFunction[i] = DellUnsupported;
@@ -644,7 +625,7 @@ DriverEntry(
             &deviceName,
             FILE_DEVICE_UNKNOWN,
             FILE_DEVICE_SECURE_OPEN,
-            FALSE,
+            TRUE,
             &deviceObject
             );
 
