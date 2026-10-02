@@ -3,6 +3,7 @@
 #include <winioctl.h>
 #include <stdio.h>
 #include <conio.h>
+#include <mmsystem.h>
 
 #define IOCTL_DELL_READ_STATUS \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
@@ -254,10 +255,10 @@ PrintHelp(VOID)
 {
     printf("\nControls:\n");
     printf("  A       AUTO: stop overriding BIOS\n");
-    printf("  L       HOLD-LOW: repeatedly request LOW\n");
+    printf("  L       HOLD-LOW: poll BIOS and request LOW only when needed\n");
     printf("  T       TARGET-RPM mode\n");
     printf("  + / -   target RPM +/- 100\n");
-    printf("  ] / [   pulse interval +/- 25 ms\n");
+    printf("  ] / [   poll interval +/- 5 ms\n");
     printf("  2       request HIGH once, then AUTO\n");
     printf("  H       show help\n");
     printf("  Q       request HIGH once and quit\n\n");
@@ -272,7 +273,7 @@ main(void)
     DWORD lowNominal = 0;
     DWORD highNominal = 0;
     DWORD targetRpm = 3500;
-    DWORD pulseMs = 100;
+    DWORD pulseMs = 10;
     DWORD hysteresis = 120;
     DWORD tempLimit = 85;
     DWORD maxTemp = 0;
@@ -357,6 +358,8 @@ main(void)
             );
     }
 
+    timeBeginPeriod(1);
+
     PrintHelp();
 
     while (running)
@@ -421,7 +424,21 @@ main(void)
                 now - lastControl >= pulseMs
                )
             {
-                SetState(h, 1);
+                /*
+                 * Quiet hold:
+                 * poll the Dell-reported state frequently, but do NOT
+                 * keep hammering LOW while the fan is already in state 1.
+                 * Only counter the BIOS after it changes away from LOW.
+                 */
+                if (
+                    ReadStatus(h, &status) &&
+                    status.StateValid == 1 &&
+                    status.State != 1
+                   )
+                {
+                    SetState(h, 1);
+                }
+
                 lastControl = now;
             }
         }
@@ -487,7 +504,7 @@ main(void)
                 }
 
                 printf(
-                    "target=%lu  pulse=%lums  ",
+                    "target=%lu  poll=%lums  ",
                     targetRpm,
                     pulseMs
                     );
@@ -539,7 +556,7 @@ main(void)
                     lastControl = 0;
 
                     printf(
-                        "\nHOLD-LOW: LOW every %lu ms.\n",
+                        "\nHOLD-LOW: polling every %lu ms; LOW only when BIOS leaves state 1.\n",
                         pulseMs
                         );
                 }
@@ -604,23 +621,23 @@ main(void)
             {
                 if (pulseMs < 1000)
                 {
-                    pulseMs += 25;
+                    pulseMs += 5;
                 }
 
                 printf(
-                    "\nPulse interval = %lu ms\n",
+                    "\nPoll interval = %lu ms\n",
                     pulseMs
                     );
             }
             else if (ch == '[')
             {
-                if (pulseMs > 50)
+                if (pulseMs > 5)
                 {
-                    pulseMs -= 25;
+                    pulseMs -= 5;
                 }
 
                 printf(
-                    "\nPulse interval = %lu ms\n",
+                    "\nPoll interval = %lu ms\n",
                     pulseMs
                     );
             }
@@ -645,9 +662,10 @@ main(void)
             }
         }
 
-        Sleep(25);
+        Sleep(1);
     }
 
+    timeEndPeriod(1);
     CloseHandle(h);
 
     printf(
