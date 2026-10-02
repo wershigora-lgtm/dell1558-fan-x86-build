@@ -257,7 +257,7 @@ PrintHelp(VOID)
     printf("\nControls:\n");
     printf("  A       AUTO: stop overriding BIOS\n");
     printf("  L       HOLD-LOW: poll BIOS and request LOW only when needed\n");
-    printf("  T       TARGET-RPM mode\n");
+    printf("  T       TARGET-RPM: LOW-only governor (never kicks HIGH)\n");
     printf("  + / -   target RPM +/- 100\n");
     printf("  ] / [   poll interval +/- 5 ms\n");
     printf("  2       request HIGH once, then AUTO\n");
@@ -450,24 +450,30 @@ main(void)
                 now - lastControl >= pulseMs
                )
             {
+                /*
+                 * Smooth target governor:
+                 * NEVER request HIGH here.  HIGH was the cause of the
+                 * large 3200 -> 4800 RPM surges seen in the first build.
+                 *
+                 * We only suppress the BIOS with LOW when RPM has risen
+                 * above the requested target band.  When RPM is at or
+                 * below target, we simply stop overriding and let BIOS
+                 * provide whatever upward drive it wants.  With 10 ms
+                 * polling, the next LOW request should catch that rise
+                 * quickly without an explicit HIGH kick.
+                 */
                 if (
                     ReadStatus(h, &status) &&
-                    status.RpmValid == 1
+                    status.RpmValid == 1 &&
+                    status.StateValid == 1
                    )
                 {
                     if (
-                        status.Rpm >
-                        targetRpm + hysteresis
+                        status.Rpm > targetRpm + hysteresis &&
+                        status.State != 1
                        )
                     {
                         SetState(h, 1);
-                    }
-                    else if (
-                        status.Rpm + hysteresis <
-                        targetRpm
-                        )
-                    {
-                        SetState(h, 2);
                     }
                 }
 
@@ -576,7 +582,7 @@ main(void)
                     lastControl = 0;
 
                     printf(
-                        "\nTARGET mode: %lu RPM.\n",
+                        "\nTARGET mode: %lu RPM, LOW-only governor.\n",
                         targetRpm
                         );
                 }
