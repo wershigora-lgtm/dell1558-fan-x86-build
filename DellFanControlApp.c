@@ -256,7 +256,7 @@ PrintHelp(VOID)
 {
     printf("\nControls:\n");
     printf("  A       AUTO: stop overriding BIOS\n");
-    printf("  L       HOLD-LOW: poll BIOS and request LOW only when needed\n");
+    printf("  L       FORCE-LOW: request LOW every poll interval\n");
     printf("  T       TARGET-RPM: LOW-only governor (never kicks HIGH)\n");
     printf("  + / -   target RPM +/- 100\n");
     printf("  ] / [   poll interval +/- 5 ms\n");
@@ -426,20 +426,17 @@ main(void)
                )
             {
                 /*
-                 * Quiet hold:
-                 * poll the Dell-reported state frequently, but do NOT
-                 * keep hammering LOW while the fan is already in state 1.
-                 * Only counter the BIOS after it changes away from LOW.
+                 * FORCE-LOW:
+                 * The Dell BIOS can briefly reassert state 2 faster than
+                 * our 1-second telemetry display can show.  Those short
+                 * torque changes are audible even when rotor inertia keeps
+                 * measured RPM near 3150.
+                 *
+                 * Therefore LOW is reasserted every poll interval whether
+                 * the last reported state is 1 or 2.  At the default 10 ms
+                 * interval this is 100 LOW requests per second.
                  */
-                if (
-                    ReadStatus(h, &status) &&
-                    status.StateValid == 1 &&
-                    status.State != 1
-                   )
-                {
-                    SetState(h, 1);
-                }
-
+                SetState(h, 1);
                 lastControl = now;
             }
         }
@@ -563,7 +560,7 @@ main(void)
                     lastControl = 0;
 
                     printf(
-                        "\nHOLD-LOW: polling every %lu ms; LOW only when BIOS leaves state 1.\n",
+                        "\nFORCE-LOW: LOW every %lu ms.\n",
                         pulseMs
                         );
                 }
