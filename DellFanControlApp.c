@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <conio.h>
 #include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 #define IOCTL_DELL_READ_STATUS \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS)
